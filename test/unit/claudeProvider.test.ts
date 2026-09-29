@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import Anthropic from "@anthropic-ai/sdk";
-import { ClaudeModelProvider, DEFAULT_MODEL, ModelProviderError, ModelRefusalError, type MessagesClient } from "../../src/model/claude";
+import { ClaudeModelProvider, DEFAULT_MODEL, ModelProviderError, ModelRefusalError, type MessagesClient, type TextStream } from "../../src/model/claude";
 import { createEmbeddingProvider, createModelProvider } from "../../src/model";
 
 type CreateParams = Anthropic.MessageCreateParamsNonStreaming;
@@ -127,6 +127,150 @@ describe("ClaudeModelProvider stop reasons and errors", () => {
       expect((got as ModelProviderError).status).toBe(c.status);
       expect((got as ModelProviderError).cause).toBe(c.err);
     }
+  });
+});
+
+/**
+ * Fake `client.messages.stream(params)`: a MessageStream-shaped object whose
+ * `finalMessage()` first fires the registered `text` listeners with each delta
+ * (after `on("text")` was attached, as the real stream does) then resolves.
+ */
+function fakeStreamingClient(
+  script: (params: CreateParams) => { deltas: string[]; final: Partial<Anthropic.Message> } | { reject: Error },
+): { client: MessagesClient; calls: CreateParams[]; createCalls: number } {
+  const calls: CreateParams[] = [];
+  const state = { createCalls: 0 };
+  const client: MessagesClient = {
+    messages: {
+      create: async () => {
+        state.createCalls += 1;
+        throw new Error("create must not be used when streaming");
+      },
+      stream: (params: CreateParams): TextStream => {
+        calls.push(params);
+        const listeners: ((d: string, snap: string) => void)[] = [];
+        return {
+          on: (event, listener) => {
+            if (event === "text") listeners.push(listener);
+          },
+          finalMessage: async () => {
+            const r = script(params);
+            if ("reject" in r) throw r.reject;
+            let snapshot = "";
+            for (const d of r.deltas) {
+              snapshot += d;
+              for (const l of listeners) l(d, snapshot);
+            }
+            return r.final as Anthropic.Message;
+          },
+        };
+      },
+    },
+  };
+  return {
+    client,
+    calls,
+    get createCalls() {
+      return state.createCalls;
+    },
+  };
+}
+
+describe("ClaudeModelProvider stream", () => {
+  test("forwards each text delta in order and resolves with the final message text; request params match complete()", async () => {
+    const f = fakeStreamingClient(() => ({ deltas: ["Hel", "lo, ", "world"], final: textResponse("Hello, world") }));
+    const p = new ClaudeModelProvider({ client: f.client, effort: "medium" });
+    const deltas: string[] = [];
+    const out = await p.stream({ system: "You are the chat.", messages: [{ role: "user", content: "hi" }], maxTokens: 2048 }, (d) => deltas.push(d));
+    expect(deltas).toEqual(["Hel", "lo, ", "world"]);
+    expect(out).toBe("Hello, world");
+    expect(f.createCalls).toBe(0);
+    expect(f.calls).toHaveLength(1);
+    const req = f.calls[0]!;
+    // identical shape to complete(): the SDK helper adds `stream: true` itself
+    expect(Object.keys(req).sort()).toEqual(["max_tokens", "messages", "model", "output_config", "system"]);
+    expect(req.max_tokens).toBe(2048);
+    expect(req.output_config).toEqual({ effort: "medium" });
+    expect(req.system).toEqual([{ type: "text", text: "You are the chat.", cache_control: { type: "ephemeral" } }]);
+    expect("stream" in req).toBe(false);
+  });
+
+  test("final text comes from finalMessage() (text blocks concatenated), not from the deltas", async () => {
+    const f = fakeStreamingClient(() => ({
+      deltas: ["a", "b"],
+      final: {
+        content: [
+          { type: "thinking", thinking: "", signature: "" },
+          { type: "text", text: "a", citations: null },
+          { type: "text", text: "b", citations: null },
+        ],
+        stop_reason: "end_turn",
+        stop_details: null,
+      },
+    }));
+    const p = new ClaudeModelProvider({ client: f.client });
+    expect(await p.stream({ system: "s", messages: [{ role: "user", content: "x" }] }, () => {})).toBe("ab");
+  });
+
+  test("refusal (possibly after deltas) → ModelRefusalError with stop_details", async () => {
+    const f = fakeStreamingClient(() => ({
+      deltas: ["I was starting to"],
+      final: { content: [{ type: "text", text: "I was starting to", citations: null }], stop_reason: "refusal", stop_details: { type: "refusal", category: "cyber", explanation: "declined" } },
+    }));
+    const p = new ClaudeModelProvider({ client: f.client });
+    const deltas: string[] = [];
+    const err = await p.stream({ system: "s", messages: [{ role: "user", content: "x" }] }, (d) => deltas.push(d)).catch((e) => e);
+    expect(err).toBeInstanceOf(ModelRefusalError);
+    expect((err as ModelRefusalError).category).toBe("cyber");
+    expect((err as ModelRefusalError).explanation).toBe("declined");
+    expect(deltas).toEqual(["I was starting to"]);
+  });
+
+  test("max_tokens → partial text returned and a warning emitted", async () => {
+    const f = fakeStreamingClient(() => ({ deltas: ["part", "ial"], final: textResponse("partial", "max_tokens") }));
+    const warnings: string[] = [];
+    const p = new ClaudeModelProvider({ client: f.client, warn: (m) => warnings.push(m) });
+    expect(await p.stream({ system: "s", messages: [{ role: "user", content: "x" }] }, () => {})).toBe("partial");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("max_tokens");
+  });
+
+  test("SDK errors from the stream are wrapped into ModelProviderError", async () => {
+    const headers = new Headers();
+    const cases: { err: Error; retryable: boolean; status?: number }[] = [
+      { err: new Anthropic.RateLimitError(429, { type: "rate_limit_error" }, "slow down", headers), retryable: true, status: 429 },
+      { err: new Anthropic.AuthenticationError(401, { type: "authentication_error" }, "bad key", headers), retryable: false, status: 401 },
+      { err: new Anthropic.APIConnectionError({ message: "ECONNRESET" }), retryable: true },
+    ];
+    for (const c of cases) {
+      const f = fakeStreamingClient(() => ({ reject: c.err }));
+      const p = new ClaudeModelProvider({ client: f.client });
+      const got = await p.stream({ system: "s", messages: [{ role: "user", content: "x" }] }, () => {}).catch((e) => e);
+      expect(got).toBeInstanceOf(ModelProviderError);
+      expect((got as ModelProviderError).retryable).toBe(c.retryable);
+      expect((got as ModelProviderError).status).toBe(c.status);
+      expect((got as ModelProviderError).cause).toBe(c.err);
+    }
+    // an error thrown synchronously by stream() itself is wrapped too
+    const sync: MessagesClient = {
+      messages: {
+        create: async () => textResponse("x") as Anthropic.Message,
+        stream: () => {
+          throw new Anthropic.BadRequestError(400, { type: "invalid_request_error" }, "bad", headers);
+        },
+      },
+    };
+    const got = await new ClaudeModelProvider({ client: sync }).stream({ system: "s", messages: [{ role: "user", content: "x" }] }, () => {}).catch((e) => e);
+    expect(got).toBeInstanceOf(ModelProviderError);
+    expect((got as ModelProviderError).status).toBe(400);
+  });
+
+  test("a client without stream() falls back to complete()", async () => {
+    const { client, calls } = fakeClient(() => textResponse("plain"));
+    const deltas: string[] = [];
+    expect(await new ClaudeModelProvider({ client }).stream({ system: "s", messages: [{ role: "user", content: "x" }] }, (d) => deltas.push(d))).toBe("plain");
+    expect(calls).toHaveLength(1);
+    expect(deltas).toEqual([]);
   });
 });
 

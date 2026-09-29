@@ -37,6 +37,8 @@ export interface RunTurnOptions {
   awaitKnowledge?: boolean;
   /** Trailing turns handed to the extractor. Default 8. */
   window?: number;
+  /** Streams the reply's text deltas (see `ReplyOptions.onDelta`); the stored assistant turn is the full text regardless. */
+  onDelta?: (text: string) => void;
 }
 
 export interface TurnResult {
@@ -90,7 +92,7 @@ export async function runTurn(deps: SessionDeps, sessionId: string, userText: st
   const turn = store.appendTurn(sessionId, "user", userText);
   const all = store.getTurns(sessionId);
   const replyWindow = Math.max(1, deps.replyWindow ?? DEFAULT_REPLY_WINDOW);
-  const { reply, contextNotes } = await replyToTurn(deps, all.slice(Math.max(0, all.length - replyWindow)));
+  const { reply, contextNotes } = await replyToTurn(deps, all.slice(Math.max(0, all.length - replyWindow)), opts.onDelta ? { onDelta: opts.onDelta } : {});
   const assistantTurn = store.appendTurn(sessionId, "assistant", reply);
 
   const knowledgeDeps = { coord: deps.coord, db: deps.db, model: deps.model, embeddings: deps.embeddings, config: deps.config, today: deps.today ?? todayIso(), ...(deps.log ? { log: deps.log } : {}) };

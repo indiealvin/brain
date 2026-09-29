@@ -93,14 +93,22 @@ export interface ReplyDeps {
 export interface ReplyOptions {
   contextLimit?: number;
   maxTokens?: number;
+  /**
+   * Receives each text delta as it arrives. Streaming is used only when this
+   * is given *and* the provider implements `stream`; otherwise `complete`.
+   * The returned `reply` is the full final text either way.
+   */
+  onDelta?: (text: string) => void;
 }
 
-/** One `model.complete` call: retrieve context for the latest user turn, then reply. */
+/** One model call: retrieve context for the latest user turn, then reply (streamed when possible). */
 export async function replyToTurn(deps: ReplyDeps, turns: ConversationTurn[], opts: ReplyOptions = {}): Promise<{ reply: string; contextNotes: ContextNote[] }> {
   const lastUser = [...turns].reverse().find((t) => t.role === "user");
   const contextNotes = lastUser ? await retrieveContext(deps.db, deps.embeddings, lastUser.text, opts.contextLimit ?? DEFAULT_CONTEXT_LIMIT) : [];
   const { system, messages } = buildChatMessages(turns, contextNotes);
   if (messages.length === 0) messages.push({ role: "user", content: "(empty turn)" });
-  const reply = await deps.model.complete({ system, messages, maxTokens: opts.maxTokens ?? DEFAULT_CHAT_MAX_TOKENS });
+  const input = { system, messages, maxTokens: opts.maxTokens ?? DEFAULT_CHAT_MAX_TOKENS };
+  const { model } = deps;
+  const reply = opts.onDelta && typeof model.stream === "function" ? await model.stream(input, opts.onDelta) : await model.complete(input);
   return { reply: reply.trim(), contextNotes };
 }

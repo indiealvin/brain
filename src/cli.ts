@@ -224,6 +224,8 @@ async function openRepo(flags: ParsedArgs["flags"]): Promise<{ coord: Coord; rec
 interface Io {
   out: (line: string) => void;
   err: (line: string) => void;
+  /** Raw stdout write (no newline) for streamed reply text. */
+  write: (chunk: string) => void;
   json: boolean;
 }
 
@@ -521,10 +523,11 @@ function chatModelProvider(io: Io): ModelProvider {
 
 /**
  * Terminal wait indicator. Only animates when stderr is a TTY (tests and
- * pipes see nothing); frames are written with \r and cleared on completion.
+ * pipes see nothing); frames are written with \r and cleared by `stop()`,
+ * which is idempotent so a streaming reply can stop it on its first delta.
  */
-async function withSpinner<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  if (process.stderr.isTTY !== true) return fn();
+function startSpinner(label: string): { stop: () => void } {
+  if (process.stderr.isTTY !== true) return { stop: () => {} };
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const started = Date.now();
   let i = 0;
@@ -534,12 +537,89 @@ async function withSpinner<T>(label: string, fn: () => Promise<T>): Promise<T> {
   };
   draw();
   const timer = setInterval(draw, 80);
+  let stopped = false;
+  return {
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      process.stderr.write("\r\x1b[2K");
+    },
+  };
+}
+
+async function withSpinner<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const spinner = startSpinner(label);
   try {
     return await fn();
   } finally {
-    clearInterval(timer);
-    process.stderr.write("\r\x1b[2K");
+    spinner.stop();
   }
+}
+
+/**
+ * Writes streamed reply deltas to stdout so the bytes equal what
+ * `io.out(reply.trim())` would have printed: leading whitespace is skipped,
+ * trailing whitespace is held back until more text follows, and `end()`
+ * terminates the line only if something was written (the caller prints the
+ * reply itself otherwise, e.g. an empty reply or a provider without `stream`).
+ */
+function replyWriter(io: Io, hooks: StreamHooks): { delta: (text: string) => void; end: () => boolean } {
+  let started = false;
+  let held = "";
+  return {
+    delta: (text) => {
+      if (!started) {
+        text = text.replace(/^\s+/, "");
+        if (text === "") return;
+        started = true;
+        hooks.onFirst?.();
+      }
+      const trailing = /\s*$/.exec(text)![0];
+      const body = text.slice(0, text.length - trailing.length);
+      if (body === "") {
+        held += trailing;
+        return;
+      }
+      io.write(held + body);
+      held = trailing;
+    },
+    end: () => {
+      if (started) io.write("\n");
+      hooks.onEnd?.();
+      return started;
+    },
+  };
+}
+
+interface StreamHooks {
+  /** First visible reply text is about to be written (stdout is now mid-line). */
+  onFirst?: () => void;
+  /** The reply line was terminated (or nothing was streamed); stdout is at a line start again. */
+  onEnd?: () => void;
+}
+
+/** One turn with the reply streamed to stdout; the spinner runs until the first delta. `--json` never streams. */
+async function streamedTurn(deps: Parameters<typeof runTurn>[0], sessionId: string, text: string, io: Io, hooks: StreamHooks = {}): Promise<Awaited<ReturnType<typeof runTurn>>> {
+  const spinner = startSpinner("thinking…");
+  const writer = replyWriter(io, {
+    onFirst: () => {
+      spinner.stop();
+      hooks.onFirst?.();
+    },
+    onEnd: hooks.onEnd,
+  });
+  let r: Awaited<ReturnType<typeof runTurn>>;
+  try {
+    r = await runTurn(deps, sessionId, text, { onDelta: writer.delta });
+  } catch (e) {
+    writer.end(); // terminate a partially streamed line before the error is reported
+    throw e;
+  } finally {
+    spinner.stop();
+  }
+  if (!writer.end()) io.out(r.reply);
+  return r;
 }
 
 async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
@@ -568,13 +648,13 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
     };
 
     if (once !== undefined) {
-      const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, once)));
       if (io.json) {
+        const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, once)));
         const knowledge = await r.knowledge;
         emit(io, { sessionId, reply: r.reply, contextNotes: r.contextNotes, knowledge, summary: formatKnowledgeSummary(knowledge) }, () => "");
         return;
       }
-      io.out(r.reply);
+      const r = track(await streamedTurn(deps, sessionId, once, io));
       // never rejects; always awaited before exit
       const knowledge = await withSpinner("updating knowledge…", () => r.knowledge);
       if (wait) io.out(formatKnowledgeSummary(knowledge));
@@ -601,10 +681,27 @@ async function chatRepl(
   io.err("type a message; /proposals lists pending proposals; /quit or Ctrl-D exits");
   let busy: Promise<void> = Promise.resolve();
   let closed = false;
+  // A knowledge summary from an earlier turn may finish while a later reply is
+  // still streaming; it is queued rather than injected into the half-written line.
+  let midLine = false;
+  const pending: string[] = [];
 
   const say = (line: string) => {
+    if (midLine) {
+      pending.push(line);
+      return;
+    }
     io.out(line);
     if (!closed) rl.prompt(true);
+  };
+  const hooks: StreamHooks = {
+    onFirst: () => {
+      midLine = true;
+    },
+    onEnd: () => {
+      midLine = false;
+      for (const line of pending.splice(0)) io.out(line);
+    },
   };
 
   const handle = async (line: string): Promise<void> => {
@@ -625,8 +722,7 @@ async function chatRepl(
       return;
     }
     try {
-      const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, text)));
-      io.out(r.reply);
+      const r = track(await streamedTurn(deps, sessionId, text, io, hooks));
       if (process.stderr.isTTY === true) io.err("\x1b[2m… updating knowledge in the background; the summary will appear when it finishes\x1b[0m");
       void r.knowledge.then((u) => {
         say(formatKnowledgeSummary(u));
@@ -826,7 +922,7 @@ async function cmdDoctor(args: ParsedArgs, io: Io): Promise<number> {
 // dispatch
 // ---------------------------------------------------------------------------
 
-export async function main(argv: string[], io: Io = { out: console.log, err: console.error, json: false }): Promise<number> {
+export async function main(argv: string[], io: Io = { out: console.log, err: console.error, write: (chunk) => void process.stdout.write(chunk), json: false }): Promise<number> {
   const args = parseArgs(argv);
   io.json = args.flags["json"] === true;
   const cmd = args.positional[0];

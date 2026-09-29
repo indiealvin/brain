@@ -123,6 +123,7 @@ Rules for every task:
 
 ## Follow-ups found during implementation (not blocking v0 exit criteria 1–11)
 - [ ] F1 RENAME_SLUG proposals: `Proposal.targets` is present-only, so a rename's new path cannot be declared; add an `absent` snapshot form (types.ts change) before enabling RENAME_SLUG.
+- [x] F8 Streaming chat replies (ModelProvider.stream; Claude SDK stream, OpenRouter SSE) — v0.1.3
 - [ ] F2 Prompt caching for chat: `ModelProvider.complete` takes one `system` string; split stable prefix / volatile context into two blocks so retrieved notes do not defeat the cache.
 - [ ] F3 Windowed re-extraction: turn N+1 re-sees turns of turn N; duplicates land as NOOP/REPLAN today. Track "already extracted through turn X" per session.
 - [ ] F4 Executor namespace check parses every note (P3.7); switch to `index.namespace()`.

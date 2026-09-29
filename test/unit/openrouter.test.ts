@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { OpenRouterEmbeddingProvider, OpenRouterModelProvider } from "../../src/model/openrouter";
+import { OpenRouterEmbeddingProvider, OpenRouterModelProvider, readSseJson } from "../../src/model/openrouter";
 import { createEmbeddingProvider, createModelProvider, resolveProviderKind } from "../../src/model/index";
 import { ModelProviderError, ModelRefusalError } from "../../src/model/claude";
 import { ClaudeModelProvider } from "../../src/model/claude";
@@ -100,6 +100,125 @@ describe("OpenRouterModelProvider", () => {
     const err = await p.complete({ system: "s", messages: [{ role: "user", content: "u" }] }).catch((e) => e);
     expect(err).toBeInstanceOf(ModelProviderError);
     expect(err.message).toContain("no credits");
+  });
+});
+
+/** A 200 text/event-stream Response whose body delivers `chunks` as separate reads. */
+function sseResponse(chunks: string[], status = 200): Response {
+  const enc = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      controller.close();
+    },
+  });
+  return new Response(body, { status, headers: { "content-type": "text/event-stream" } });
+}
+
+const sse = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+const delta = (content: string | undefined, finish_reason: string | null = null) => ({ id: "gen", choices: [{ index: 0, delta: content === undefined ? { role: "assistant" } : { content }, finish_reason }] });
+
+describe("OpenRouterModelProvider.stream", () => {
+  test("sends stream: true and forwards deltas across chunk boundaries, ignoring comments and [DONE]", async () => {
+    const events = [
+      ": OPENROUTER PROCESSING\n\n",
+      sse(delta(undefined)),
+      sse(delta("Hel")),
+      sse(delta("lo, ")),
+      ": OPENROUTER PROCESSING\n\n",
+      sse(delta("world")),
+      sse({ id: "gen", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+      sse({ id: "gen", choices: [], usage: { prompt_tokens: 1, completion_tokens: 3 } }),
+      "data: [DONE]\n\n",
+    ].join("");
+    // split the byte stream in the middle of a `data:` line (inside "choices")
+    const cut = events.indexOf('"cho', events.indexOf("Hel")) + 2;
+    const cut2 = events.indexOf("world") + 2;
+    const chunks = [events.slice(0, cut), events.slice(cut, cut2), events.slice(cut2)];
+    expect(chunks.join("")).toBe(events);
+
+    const f = fakeFetch(() => sseResponse(chunks));
+    const p = new OpenRouterModelProvider({ apiKey: "k", model: "m", fetch: f.fn, reasoningEffort: "low" });
+    const deltas: string[] = [];
+    const out = await p.stream({ system: "SYS", messages: [{ role: "user", content: "hi" }], maxTokens: 99 }, (d) => deltas.push(d));
+    expect(deltas).toEqual(["Hel", "lo, ", "world"]);
+    expect(out).toBe("Hello, world");
+    expect(f.calls.length).toBe(1);
+    expect(f.calls[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(f.calls[0]!.body).toEqual({
+      model: "m",
+      max_tokens: 99,
+      messages: [
+        { role: "system", content: "SYS" },
+        { role: "user", content: "hi" },
+      ],
+      reasoning: { effort: "low" },
+      stream: true,
+    });
+  });
+
+  test("complete() never sends stream", async () => {
+    const f = fakeFetch(() => jsonResponse({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+    await new OpenRouterModelProvider({ apiKey: "k", fetch: f.fn }).complete({ system: "s", messages: [{ role: "user", content: "u" }] });
+    expect("stream" in f.calls[0]!.body).toBe(false);
+  });
+
+  test("CRLF line endings and a final event without a trailing blank line are handled", async () => {
+    const raw = `data: ${JSON.stringify(delta("a"))}\r\n\r\ndata: ${JSON.stringify(delta("b", "stop"))}\r\n`;
+    const f = fakeFetch(() => sseResponse([raw]));
+    const deltas: string[] = [];
+    const out = await new OpenRouterModelProvider({ apiKey: "k", fetch: f.fn }).stream({ system: "", messages: [{ role: "user", content: "u" }] }, (d) => deltas.push(d));
+    expect(deltas).toEqual(["a", "b"]);
+    expect(out).toBe("ab");
+  });
+
+  test("mid-stream error object → ModelProviderError (deltas before it were delivered)", async () => {
+    const f = fakeFetch(() => sseResponse([sse(delta("partial")), sse({ error: { message: "provider overloaded", code: 502 } }), "data: [DONE]\n\n"]));
+    const deltas: string[] = [];
+    const err = await new OpenRouterModelProvider({ apiKey: "k", fetch: f.fn })
+      .stream({ system: "s", messages: [{ role: "user", content: "u" }] }, (d) => deltas.push(d))
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ModelProviderError);
+    expect(err.message).toContain("provider overloaded");
+    expect(err.retryable).toBe(true);
+    expect(err.status).toBe(502);
+    expect(deltas).toEqual(["partial"]);
+    expect(f.calls.length).toBe(1); // never retried mid-stream
+  });
+
+  test("finish_reason content_filter → ModelRefusalError; length → warn", async () => {
+    const f = fakeFetch(() => sseResponse([sse(delta("x")), sse({ choices: [{ index: 0, delta: {}, finish_reason: "content_filter" }] }), "data: [DONE]\n\n"]));
+    await expect(new OpenRouterModelProvider({ apiKey: "k", fetch: f.fn }).stream({ system: "s", messages: [{ role: "user", content: "u" }] }, () => {})).rejects.toBeInstanceOf(ModelRefusalError);
+
+    const warnings: string[] = [];
+    const g = fakeFetch(() => sseResponse([sse(delta("cut ")), sse(delta("off", "length")), "data: [DONE]\n\n"]));
+    const out = await new OpenRouterModelProvider({ apiKey: "k", fetch: g.fn, warn: (m) => warnings.push(m) }).stream({ system: "s", messages: [{ role: "user", content: "u" }] }, () => {});
+    expect(out).toBe("cut off");
+    expect(warnings.length).toBe(1);
+  });
+
+  test("initial HTTP failures are retried, then a JSON error envelope on 200 is raised", async () => {
+    let n = 0;
+    const f = fakeFetch(() => {
+      n += 1;
+      if (n === 1) return jsonResponse({ error: { message: "busy" } }, 503);
+      return sseResponse([sse(delta("ok", "stop")), "data: [DONE]\n\n"]);
+    });
+    const p = new OpenRouterModelProvider({ apiKey: "k", fetch: f.fn, sleep: noSleep });
+    expect(await p.stream({ system: "s", messages: [{ role: "user", content: "u" }] }, () => {})).toBe("ok");
+    expect(f.calls.length).toBe(2);
+
+    const g = fakeFetch(() => jsonResponse({ error: { message: "no credits", code: 402 } }));
+    const err = await new OpenRouterModelProvider({ apiKey: "k", fetch: g.fn }).stream({ system: "s", messages: [{ role: "user", content: "u" }] }, () => {}).catch((e) => e);
+    expect(err).toBeInstanceOf(ModelProviderError);
+    expect(err.message).toContain("no credits");
+  });
+
+  test("readSseJson: malformed JSON chunk is a non-retryable ModelProviderError", async () => {
+    const body = sseResponse(["data: {not json\n\n"]).body!;
+    const err = await readSseJson(body, () => {}).catch((e) => e);
+    expect(err).toBeInstanceOf(ModelProviderError);
+    expect(err.retryable).toBe(false);
   });
 });
 

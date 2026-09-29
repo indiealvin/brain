@@ -14,7 +14,7 @@ import { openIndex, type IndexDb } from "../../src/index/schema";
 import { PLANNER_SYSTEM_PROMPT } from "../../src/plan/prompts";
 import { CHAT_SYSTEM_PROMPT, buildChatMessages, excerptOf, retrieveContext } from "../../src/pipeline/chat";
 import { formatKnowledgeSummary, processTurnForKnowledge, type KnowledgeEvent, type KnowledgeUpdate } from "../../src/pipeline/knowledge";
-import { MOCK_CHAT_REPLY, createMockModelProvider } from "../../src/pipeline/mock";
+import { MOCK_CHAT_REPLY, StreamingMockModelProvider, chunkWords, createMockModelProvider } from "../../src/pipeline/mock";
 import { runTurn } from "../../src/pipeline/session";
 import { HashingEmbeddingProvider, ensureEmbeddings } from "../../src/retrieval/embeddings";
 import { setupEnv, seedNote, fileAt, mutationIdsOn, revParse, type Env } from "../harness";
@@ -307,6 +307,84 @@ describe("chat prompt", () => {
     expect(await m.complete({ system: PLANNER_SYSTEM_PROMPT, messages: [] })).toBe('{"operations": []}');
     expect(await m.complete({ system: CHAT_SYSTEM_PROMPT + "\n\nextra", messages: [] })).toBe(MOCK_CHAT_REPLY);
   });
+
+  test("mock provider streams the canned reply in ~5-word chunks that concatenate to the reply", async () => {
+    const m = createMockModelProvider();
+    const deltas: string[] = [];
+    const out = await m.stream({ system: CHAT_SYSTEM_PROMPT, messages: [] }, (d) => deltas.push(d));
+    expect(out).toBe(MOCK_CHAT_REPLY);
+    expect(deltas.join("")).toBe(MOCK_CHAT_REPLY);
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas).toEqual(chunkWords(MOCK_CHAT_REPLY));
+    for (const d of deltas.slice(0, -1)) expect(d.trim().split(/\s+/).length).toBe(5);
+    expect(m.calls.length).toBe(1);
+    expect(chunkWords("one two three four five six seven")).toEqual(["one two three four five ", "six seven"]);
+  });
+});
+
+describe("runTurn streaming", () => {
+  test("a provider with stream(): deltas arrive in order and concatenate to the stored assistant turn", async () => {
+    const sessionId = store.createSession();
+    const model = new StreamingMockModelProvider((input) => {
+      if (input.system === EXTRACTOR_SYSTEM_PROMPT) return '{"candidates": []}';
+      if (input.system.startsWith(CHAT_SYSTEM_PROMPT)) return REPLY;
+      throw new Error("unexpected call");
+    }, 0);
+    const deltas: string[] = [];
+    let repliedBeforeStore = false;
+    const r = await runTurn(deps(model), sessionId, USER_TEXT, {
+      onDelta: (d) => {
+        deltas.push(d);
+        if (store.getTurns(sessionId).length === 1) repliedBeforeStore = true;
+      },
+      awaitKnowledge: true,
+    });
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.join("")).toBe(REPLY);
+    expect(r.reply).toBe(REPLY);
+    expect(r.assistantTurn.text).toBe(REPLY);
+    expect(store.getTurns(sessionId)[1]!.text).toBe(deltas.join(""));
+    expect(repliedBeforeStore).toBe(true); // deltas were delivered before the assistant turn was appended
+    // exactly one chat call, then the extractor (knowledge maintenance keeps using complete())
+    expect(model.calls.map((c) => (c.system.startsWith(CHAT_SYSTEM_PROMPT) ? "chat" : c.system === EXTRACTOR_SYSTEM_PROMPT ? "extractor" : "?"))).toEqual(["chat", "extractor"]);
+  });
+
+  test("streamed and non-streamed replies store identical text (surrounding whitespace trimmed)", async () => {
+    const script = (input: ModelCompleteInput) => (input.system === EXTRACTOR_SYSTEM_PROMPT ? '{"candidates": []}' : `\n  ${REPLY}  \n`);
+    const a = store.createSession();
+    const b = store.createSession();
+    const deltas: string[] = [];
+    const streamed = await runTurn(deps(new StreamingMockModelProvider(script, 0)), a, USER_TEXT, { onDelta: (d) => deltas.push(d), awaitKnowledge: true });
+    const plain = await runTurn(deps(new MockModelProvider(script)), b, USER_TEXT, { awaitKnowledge: true });
+    expect(deltas.join("").trim()).toBe(REPLY);
+    expect(streamed.reply).toBe(REPLY);
+    expect(plain.reply).toBe(REPLY);
+    expect(store.getTurns(a)[1]!.text).toBe(store.getTurns(b)[1]!.text);
+  });
+
+  test("a provider without stream() falls back to complete(); a streaming provider without onDelta uses complete()", async () => {
+    const sessionId = store.createSession();
+    const plain = routed({ extractor: '{"candidates": []}' });
+    const deltas: string[] = [];
+    const r = await runTurn(deps(plain), sessionId, "hello", { onDelta: (d) => deltas.push(d), awaitKnowledge: true });
+    expect(deltas).toEqual([]);
+    expect(r.reply).toBe(REPLY);
+    expect(store.getTurns(sessionId)[1]!.text).toBe(REPLY);
+
+    let streamCalls = 0;
+    class Spy extends StreamingMockModelProvider {
+      override stream(input: ModelCompleteInput, onDelta: (t: string) => void): Promise<string> {
+        streamCalls += 1;
+        return super.stream(input, onDelta);
+      }
+    }
+    const spy = new Spy((input) => (input.system === EXTRACTOR_SYSTEM_PROMPT ? '{"candidates": []}' : REPLY), 0);
+    const s2 = store.createSession();
+    const r2 = await runTurn(deps(spy), s2, "hello", { awaitKnowledge: true });
+    expect(streamCalls).toBe(0);
+    expect(r2.reply).toBe(REPLY);
+    expect(spy.calls.length).toBe(2);
+  });
 });
 
 describe("formatKnowledgeSummary", () => {
@@ -352,20 +430,22 @@ describe("brain chat (CLI)", () => {
       expect(run(["init", repo]).code).toBe(0);
       const r = run(["chat", "--once", "hello", "--wait"], { BRAIN_MODEL_MOCK: "1" });
       expect(r.code).toBe(0);
-      expect(r.out).toContain(MOCK_CHAT_REPLY);
-      expect(r.out).toContain("Knowledge unchanged");
+      // the reply is streamed to stdout delta by delta, yet the bytes are exactly what a single print produced
+      expect(r.out).toBe(`${MOCK_CHAT_REPLY}\nKnowledge unchanged\n`);
       expect(r.err).toMatch(/session [0-7][0-9A-HJKMNP-TV-Z]{25}/);
       const sessionId = r.err.match(/session ([0-7][0-9A-HJKMNP-TV-Z]{25})/)![1]!;
 
       // without --wait the reply is still printed and the knowledge update still awaited, but not printed
       const quiet = run(["chat", "--once", "again", "--session", sessionId], { BRAIN_MODEL_MOCK: "1" });
       expect(quiet.code).toBe(0);
-      expect(quiet.out).toContain(MOCK_CHAT_REPLY);
-      expect(quiet.out).not.toContain("Knowledge");
+      expect(quiet.out).toBe(`${MOCK_CHAT_REPLY}\n`);
       expect(quiet.err).toContain("resumed, 2 turns");
 
       const j = run(["chat", "--once", "third", "--session", sessionId, "--json"], { BRAIN_MODEL_MOCK: "1" });
       expect(j.code).toBe(0);
+      // --json never streams: stdout is exactly one JSON object
+      expect(j.out.trimStart().startsWith("{")).toBe(true);
+      expect(j.out.trimEnd().endsWith("}")).toBe(true);
       const parsed = JSON.parse(j.out);
       expect(parsed.sessionId).toBe(sessionId);
       expect(parsed.reply).toBe(MOCK_CHAT_REPLY);
