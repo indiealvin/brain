@@ -23,6 +23,8 @@ export class NoteParseError extends Error {
 export const CONNECTIONS_SECTION = "Connections";
 
 const REQUIRED_KEYS = ["id", "created", "type", "status"] as const;
+export const KNOWN_FRONTMATTER_KEYS = ["id", "created", "type", "status", "aliases"] as const;
+const KNOWN_KEYS = KNOWN_FRONTMATTER_KEYS;
 
 const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*))?\]\]/g;
 const TYPED_LINE_RE = /^\s*[-*+]\s+([^\s\[\]]+)\s+(\[\[[^\]|\n]+?(?:\|[^\]\n]*)?\]\])/;
@@ -113,6 +115,18 @@ export function parseNote(path: string, raw: string): ParsedNote {
     status: (fm["status"] as string).trim() as NoteStatus,
     aliases,
   };
+
+  // Unknown scalar keys (human-written) are preserved verbatim, in file order
+  // (spec §18). Unknown list-valued keys cannot be represented and are dropped.
+  const extra: Record<string, string> = {};
+  let haveExtra = false;
+  for (const [key, value] of Object.entries(fm)) {
+    if ((KNOWN_KEYS as readonly string[]).includes(key)) continue;
+    if (typeof value !== "string") continue;
+    extra[key] = value;
+    haveExtra = true;
+  }
+  if (haveExtra) frontmatter.extra = extra;
 
   // Body: title = first "# " line; sections = "## " headings.
   const lines = split.body.split("\n").map((l) => l.replace(/\r$/, ""));

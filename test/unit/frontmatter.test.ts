@@ -138,3 +138,47 @@ describe("parseNote details", () => {
     expect(serializeNote(n2)).toBe(out);
   });
 });
+
+describe("unknown frontmatter keys (P2.6)", () => {
+  test("parseNote collects unknown scalar keys in file order; serializeNote re-emits them after aliases", async () => {
+    const { parseNote } = await import("../../src/markdown/parse");
+    const { serializeNote } = await import("../../src/markdown/serialize");
+    const raw = [
+      "---",
+      "id: 01NOTEEXTRA00000000000001",
+      "zeta: last one",
+      "created: 2026-09-28",
+      "type: idea",
+      "tags: [a, b]",
+      "status: active",
+      "author: \"Jane: Doe\"",
+      "aliases:",
+      "  - Old",
+      "---",
+      "# T",
+      "",
+      "## Claim",
+      "c",
+      "",
+    ].join("\n");
+    const n = parseNote("knowledge/t.md", raw);
+    expect(n.frontmatter.extra).toEqual({ zeta: "last one", author: "Jane: Doe" });
+    expect(Object.keys(n.frontmatter.extra!)).toEqual(["zeta", "author"]);
+    const out = serializeNote(n);
+    expect(out.startsWith(
+      ["---", "id: 01NOTEEXTRA00000000000001", "created: 2026-09-28", "type: idea", "status: active", "aliases:", "  - Old", "zeta: last one", 'author: "Jane: Doe"', "---", "# T"].join("\n"),
+    )).toBe(true);
+    const n2 = parseNote("knowledge/t.md", out);
+    expect(n2.frontmatter).toEqual(n.frontmatter);
+    expect(serializeNote(n2)).toBe(out);
+  });
+
+  test("no unknown keys leaves extra undefined and output unchanged", async () => {
+    const { parseNote } = await import("../../src/markdown/parse");
+    const { serializeNote } = await import("../../src/markdown/serialize");
+    const raw = "---\nid: 01NOTEEXTRA00000000000002\ncreated: 2026-09-28\ntype: idea\nstatus: active\n---\n# T\n";
+    const n = parseNote("knowledge/t.md", raw);
+    expect("extra" in n.frontmatter).toBe(false);
+    expect(serializeNote(n)).toBe(raw);
+  });
+});

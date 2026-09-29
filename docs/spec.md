@@ -215,8 +215,10 @@ Runs in the agent worktree under the coordinator's single-writer lock.
    plan carries complete post-state per file, not instructions).
 7. `git status --porcelain` in the agent worktree → touched paths.
 8. Empty → `NOOP`, stop.
-9. Map touched paths to notes. If set ≠ declared targets → `reset --hard`,
-   `FAILED_INVALID_EXECUTION`, stop. Never extend targets.
+9. Map touched paths to notes. Every touched path must be in the declared
+   write set; a touched path outside it → `reset --hard`,
+   `FAILED_INVALID_EXECUTION`, stop. A declared path that turned out
+   byte-identical is tolerated (partial NOOP). Never extend targets.
 10. Normalize: if a `present` target's title changed, append the old title to
     `aliases` (§22). Run Markdown validators (frontmatter, namespace incl.
     alias collision, link grammar, content class rules). Fail →

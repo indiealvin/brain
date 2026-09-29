@@ -39,17 +39,19 @@ Rules for every task:
       section rules §26, low-content rule §28
 - [x] P2.4 `src/markdown/repo.ts`: `brain init` (brain.toml, .gitignore,
       AGENTS.md), load config
-- [ ] P2.6 preserve unknown frontmatter keys (`Frontmatter.extra`) in parse/serialize
+- [x] P2.6 preserve unknown frontmatter keys (`Frontmatter.extra`) in parse/serialize
 - [x] P2.5 `src/extract/groundingValidator.ts` §38 (pure; uses isLowContentTurn)
 - Acceptance: `test/fixtures/markdown.test.ts` and `test/fixtures/grounding.test.ts` fully pass
 
 ## Phase 3 — Git mutation engine
-- [ ] P3.1 `src/git/worktree.ts`: ensure agent worktree + `agent/repo` branch
+- [x] P3.1 `src/git/worktree.ts`: ensure agent worktree + `agent/repo` branch
       under `$BRAIN_HOME/repos/<id>/worktrees/agent`; reset-hard recovery
-- [ ] P3.2 `src/core/preconditions.ts`: validate PRESENT/ABSENT against a tree §8
-- [ ] P3.3 `src/core/executor.ts`: §12 algorithm (idempotent by Mutation-ID,
+- [x] P3.2 `src/core/preconditions.ts`: validate PRESENT/ABSENT against a tree §8
+- [x] P3.3 `src/core/executor.ts`: §12 algorithm (idempotent by Mutation-ID,
       write set check, NOOP, validators, commit with trailers)
-- [ ] P3.4 `src/core/queue.ts`: `queue.sqlite` state machine §11
+- [x] P3.4 `src/core/queue.ts`: `queue.sqlite` state machine §11
+- [x] P3.5 `src/core/coordinator.ts` scaffold: paths/config, queue, execute, submit,
+      recover §17 (1–4), minimal ff-only integrate; later-phase methods throw `not implemented`
 - Acceptance: `test/fixtures/engine.test.ts` fully passes (3.7, 3.8, 3.9, 3.13, 3.15b, 3.16; 3.24 needs Phase 5 and may stay red until then)
 
 ## Phase 4 — Human Sync + lock
@@ -68,6 +70,9 @@ Rules for every task:
 - [ ] P5.3 `src/core/coordinator.ts`: `RepoCoordinator` wiring execute →
       integrate → rebuild; startup recovery §17
 - Acceptance: `test/fixtures/rebuild.test.ts`, `sync.test.ts`, `engine.test.ts` all pass
+
+- [ ] P3.6 executor step 9: tolerate declared-but-untouched paths (spec §12 amended)
+- [ ] P3.7 (perf, later) executor namespace check should use the index instead of parsing every note
 
 ## Phase 6 — Index
 - [ ] P6.1 `src/index/schema.ts` §49; open/migrate `index.sqlite`

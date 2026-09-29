@@ -27,10 +27,10 @@ and `src/core/types.ts` are the goalposts: implementers do not edit them.
 - **I-2 Sequential validation.** Agent branch rebuild replays pending
   mutations in order; each is validated against `new_main` plus all
   previously replayed valid mutations, never against `new_main` alone.
-- **I-3 Exact write set.** After execution the touched note set must equal
+- **I-3 Declared write set.** After execution every touched path must be in
   the declared target set. Extra paths → `FAILED_INVALID_EXECUTION`, no
-  commit, targets never auto-extended. Empty diff → `NOOP`, no commit, not a
-  failure.
+  commit, targets never auto-extended. A declared path left byte-identical is
+  tolerated. Empty diff → `NOOP`, no commit, not a failure.
 - **I-4 Model-free executor.** Planner output is a fully materialized content
   patch. The executor never calls a model. Re-execution is deterministic.
 - **I-5 Dependency closure.** B depends on A if the planner declares it, or
