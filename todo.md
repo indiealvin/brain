@@ -39,7 +39,8 @@ Rules for every task:
       section rules §26, low-content rule §28
 - [ ] P2.4 `src/markdown/repo.ts`: `brain init` (brain.toml, .gitignore,
       AGENTS.md), load config
-- Acceptance: fixtures 3.15, 3.16, 3.17, 3.18 pass; `bun test test/markdown`
+- [ ] P2.5 `src/extract/groundingValidator.ts` §38 (pure; uses isLowContentTurn)
+- Acceptance: `test/fixtures/markdown.test.ts` and `test/fixtures/grounding.test.ts` fully pass
 
 ## Phase 3 — Git mutation engine
 - [ ] P3.1 `src/git/worktree.ts`: ensure agent worktree + `agent/repo` branch
@@ -48,7 +49,7 @@ Rules for every task:
 - [ ] P3.3 `src/core/executor.ts`: §12 algorithm (idempotent by Mutation-ID,
       write set check, NOOP, validators, commit with trailers)
 - [ ] P3.4 `src/core/queue.ts`: `queue.sqlite` state machine §11
-- Acceptance: fixtures 3.7, 3.8, 3.9, 3.13, 3.24 pass
+- Acceptance: `test/fixtures/engine.test.ts` fully passes (3.7, 3.8, 3.9, 3.13, 3.15b, 3.16; 3.24 needs Phase 5 and may stay red until then)
 
 ## Phase 4 — Human Sync + lock
 - [ ] P4.1 `src/sync/lock.ts`: file-based `RepoWorktreeLock` under `runtime/`
@@ -56,7 +57,7 @@ Rules for every task:
       watcher shell (not under test)
 - [ ] P4.3 `src/core/integrate.ts`: §15 ff-only in user worktree; refusal =
       retry, no state change
-- Acceptance: fixtures 3.11, 3.12 pass
+- Acceptance: `test/fixtures/sync.test.ts` fully passes (3.11 needs rebuild → do with Phase 5)
 
 ## Phase 5 — Agent branch rebuild
 - [ ] P5.1 `src/core/deps.ts`: dependency rules §10 (explicit, shared target,
@@ -65,7 +66,7 @@ Rules for every task:
       park closure, FAILED on conflict
 - [ ] P5.3 `src/core/coordinator.ts`: `RepoCoordinator` wiring execute →
       integrate → rebuild; startup recovery §17
-- Acceptance: fixtures 3.1–3.6, 3.10, 3.20 pass
+- Acceptance: `test/fixtures/rebuild.test.ts`, `sync.test.ts`, `engine.test.ts` all pass
 
 ## Phase 6 — Index
 - [ ] P6.1 `src/index/schema.ts` §49; open/migrate `index.sqlite`
@@ -73,7 +74,7 @@ Rules for every task:
       link re-resolution, human-rename detection → ADD_ALIAS enqueue, full
       rebuild fallback
 - [ ] P6.3 `src/index/backlinks.ts`
-- Acceptance: fixtures 3.21, 3.22 pass; `brain index --rebuild` equals incremental
+- Acceptance: `test/fixtures/index.test.ts` passes
 
 ## Phase 7 — Retrieval
 - [ ] P7.1 `src/retrieval/lexical.ts` (FTS5)
@@ -84,10 +85,10 @@ Rules for every task:
   mismatch case found via graph/semantic
 
 ## Phase 8 — Extractor + validators
-- [ ] P8.1 `src/extract/groundingValidator.ts` §38 (pure)
+- [x] P8.1 `src/extract/groundingValidator.ts` §38 (pure) — done in P2.5
 - [ ] P8.2 `src/extract/extractor.ts` behind `ModelProvider`; prompt +
       JSON schema; mocked-provider tests
-- Acceptance: 3.17, 3.18 via validator; extractor contract tests with mock
+- Acceptance: extractor contract tests with mock provider
 
 ## Phase 9 — Planner
 - [ ] P9.1 `src/plan/planner.ts` behind `ModelProvider`: produces fully
@@ -100,7 +101,7 @@ Rules for every task:
 - [ ] P10.1 `src/proposal/store.ts` (`proposals.sqlite`) §33–34
 - [ ] P10.2 accept → mutation with snapshot preconditions; stale detection
 - [ ] P10.3 rejected proposals → planner negative evidence
-- Acceptance: fixtures 3.14, 3.19, 3.23 pass
+- Acceptance: `test/fixtures/proposals.test.ts` passes
 
 ## Phase 11 — Conversation interface + Claude adapter
 - [ ] P11.1 `src/model/claude.ts` `ModelProvider` adapter (load `claude-api`

@@ -190,9 +190,12 @@ QUEUED|COMMITTED → BLOCKED → REPLAN  (dependency closure)
 - `FAILED_INVALID_EXECUTION`: write set ≠ declared targets.
 - `FAILED`: cherry-pick conflict (bug) or unexpected error; `lastError` set.
 
-Queue rows: `mutation_id, state, type, targets_json, depends_on_json,
-replans, attempt_count, last_error, created_at, updated_at, commit_sha
-(informational only)`.
+Queue table `queue.sqlite` → `mutations(mutation_id TEXT PRIMARY KEY, seq
+INTEGER, state TEXT, type TEXT, summary TEXT, targets_json TEXT, writes_json
+TEXT, depends_on_json TEXT, replans TEXT NULL, evidence_json TEXT, reasoning
+TEXT NULL, attempt_count INTEGER, last_error TEXT NULL, commit_sha TEXT NULL
+(informational only), created_at TEXT, updated_at TEXT)`. Fixture 3.9 forces
+`state = 'RUNNING'` directly on this table to simulate a crash.
 
 ## 12. Execution algorithm (automatic mutation)
 
@@ -203,8 +206,9 @@ Runs in the agent worktree under the coordinator's single-writer lock.
    `Mutation-ID` → `COMMITTED`, stop.
 3. Validate preconditions against agent HEAD tree. Fail → `REPLAN`.
 4. If any `present` target has `status ∈ {superseded, archived}` and the
-   operation is automatic → reject with `PROPOSAL_REQUIRED` (mutation is
-   converted to a proposal, state `REPLAN` with reason).
+   operation is automatic → no commit; `state = REPLAN`,
+   `lastError = "PROPOSAL_REQUIRED"`, `ExecutionResult.proposalRequired = true`.
+   (The planner is expected to re-emit it as a proposal.)
 5. Ensure agent worktree is clean (`git status --porcelain` empty); if not,
    `reset --hard agent/repo`.
 6. Apply the materialized patch (write full file contents per target; the
@@ -213,8 +217,10 @@ Runs in the agent worktree under the coordinator's single-writer lock.
 8. Empty → `NOOP`, stop.
 9. Map touched paths to notes. If set ≠ declared targets → `reset --hard`,
    `FAILED_INVALID_EXECUTION`, stop. Never extend targets.
-10. Run Markdown validators (frontmatter, namespace, link grammar, content
-    class rules). Fail → `reset --hard`, `FAILED`.
+10. Normalize: if a `present` target's title changed, append the old title to
+    `aliases` (§22). Run Markdown validators (frontmatter, namespace incl.
+    alias collision, link grammar, content class rules). Fail →
+    `reset --hard`, `FAILED` with `lastError` naming the issue code.
 11. `git add -A && git commit` with trailers.
 12. `state = COMMITTED`.
 13. Reconcile index to new agent HEAD (§41).
@@ -319,6 +325,24 @@ slug as alias.
 **Human rename.** When the indexer sees a note whose `id` is unchanged but
 path differs from the previous index state, the coordinator enqueues an
 automatic `ADD_ALIAS(old slug)` for that note.
+
+### 21.1 Module exports used by fixtures
+
+- `src/markdown/parse.ts`: `parseNote(path: string, raw: string): ParsedNote`
+  (throws `NoteParseError` on missing/invalid frontmatter).
+- `src/markdown/validate.ts`: `slugKey(s): string`,
+  `validateNote(note): ValidationIssue[]`,
+  `checkAliasCollision(alias, namespace: Map<string, string /*noteId*/>, selfNoteId): ValidationIssue | null`,
+  `isLowContentTurn(text, config: GroundingConfig): boolean`.
+- `src/extract/groundingValidator.ts`:
+  `validateGroundingSources(sources: string[], turns: ConversationTurn[], config): GroundingVerdict`,
+  `validateCandidate(candidate, turns, config): GroundingVerdict`.
+  Issue codes: `ASSISTANT_GROUNDING`, `LOW_CONTENT_SOLE_GROUNDING`,
+  `MISSING_LINEAGE`, `MALFORMED_SOURCE`, `UNKNOWN_TURN`, `CONFIRMATION_NOT_ADJACENT`.
+- `src/markdown/serialize.ts`: `serializeNote(note: ParsedNote): string` (stable round-trip).
+- `src/sync/lock.ts`: `withRepoWorktreeLock<T>(runtimeDir: string, fn: () => Promise<T>): Promise<T>`.
+- `src/index/reconcile.ts`: `rebuildIndex(paths: RepoPaths, commit: string): Promise<void>` (full rebuild, §42).
+- `src/core/coordinator.ts`: `openCoordinator(userWorktree, opts?)` (see `types.ts`).
 
 ## 22. Alias namespace
 
