@@ -110,7 +110,7 @@ describe("3.9 crash recovery", () => {
 });
 
 describe("3.13 superseded / archived protection", () => {
-  for (const status of ["superseded", "archived"] as const) {
+  for (const status of ["superseded", "archived", "resolved"] as const) {
     test(`automatic ENRICH on ${status} note requires a proposal`, async () => {
       env = await setupEnv();
       const x = seedNote(env, "knowledge/x.md", { title: "X", status });

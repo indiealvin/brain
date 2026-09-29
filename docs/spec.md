@@ -207,7 +207,7 @@ Runs in the agent worktree under the coordinator's single-writer lock.
 2. If the current agent branch already has a commit with this
    `Mutation-ID` → `COMMITTED`, stop.
 3. Validate preconditions against agent HEAD tree. Fail → `REPLAN`.
-4. If any `present` target has `status ∈ {superseded, archived}` and the
+4. If any `present` target has `status ∉ {active, tentative}` (I-15) and the
    operation is automatic → no commit; `state = REPLAN`,
    `lastError = "PROPOSAL_REQUIRED"`, `ExecutionResult.proposalRequired = true`.
    (The planner is expected to re-emit it as a proposal.)

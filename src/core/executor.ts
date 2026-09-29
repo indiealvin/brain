@@ -39,7 +39,8 @@ export interface ExecutorContext {
 /** States that never execute again (I-6; BLOCKED resolves to REPLAN). */
 const NON_EXECUTABLE: readonly MutationState[] = ["REPLAN", "BLOCKED", "INTEGRATED", "NOOP"];
 
-const PROTECTED_STATUSES = new Set(["superseded", "archived"]);
+/** I-15: automatic mutations may target only active/tentative notes. */
+const PROTECTED_STATUSES = new Set(["superseded", "archived", "resolved"]);
 
 function isAutomatic(type: Mutation["type"]): boolean {
   return (AUTOMATIC_MUTATION_TYPES as readonly string[]).includes(type);
