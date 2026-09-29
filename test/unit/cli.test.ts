@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { commitAsHuman, writeNote } from "../harness";
@@ -10,12 +10,36 @@ const CLI = resolve(import.meta.dir, "../../src/cli.ts");
 let home: string;
 let repo: string;
 
-function run(args: string[], opts: { cwd?: string } = {}): { code: number; out: string; err: string } {
+/**
+ * Child env with every model/key variable removed: `bun test` auto-loads the
+ * developer's `.env`, and these tests must be hermetic (no network, no real
+ * key) and observe only what `$BRAIN_HOME/config.toml` or `extra` provide.
+ */
+const PROVIDER_VARS = [
+  "OPENROUTER_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "BRAIN_MODEL_PROVIDER",
+  "BRAIN_MODEL",
+  "BRAIN_EFFORT",
+  "BRAIN_EMBEDDINGS",
+  "BRAIN_EMBEDDING_MODEL",
+  "BRAIN_EMBEDDING_DIMS",
+  "BRAIN_MODEL_MOCK",
+];
+function cleanEnv(brainHome: string, extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = { ...(process.env as Record<string, string>), BRAIN_HOME: brainHome };
+  for (const k of PROVIDER_VARS) delete env[k];
+  return { ...env, ...extra };
+}
+
+function run(args: string[], opts: { cwd?: string; home?: string; env?: Record<string, string> } = {}): { code: number; out: string; err: string } {
   const r = Bun.spawnSync(["bun", CLI, ...args], {
     cwd: opts.cwd ?? repo,
-    env: { ...process.env, BRAIN_HOME: home },
+    env: cleanEnv(opts.home ?? home, opts.env),
     stdout: "pipe",
     stderr: "pipe",
+    stdin: "ignore",
   });
   return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
 }
@@ -151,4 +175,131 @@ describe("brain CLI (Phase 11a)", () => {
     expect(findRepoRoot(join(repo, "knowledge"))).toBe(repo);
     expect(findRepoRoot(home)).toBeNull();
   });
+});
+
+describe("brain setup / doctor (first-run configuration)", () => {
+  const KEY = "sk-or-v1-clitestkey00000000abcd";
+
+  test("setup/doctor value flags parse", () => {
+    const p = parseArgs(["setup", "--provider", "openrouter", "--key", KEY, "--model", "x/y", "--embeddings", "openrouter", "--embedding-model", "m", "--dims", "8", "--yes"]);
+    expect(p.positional).toEqual(["setup"]);
+    expect(p.flags).toEqual({ provider: "openrouter", key: KEY, model: "x/y", embeddings: "openrouter", "embedding-model": "m", dims: "8", yes: true });
+  });
+
+  test(
+    "doctor --offline without config or keys exits 1 and points at brain setup; chat prints a one-line hint",
+    () => {
+      const fresh = mkdtempSync(join(tmpdir(), "brain-cli-fresh-"));
+      try {
+        const d = run(["doctor", "--offline"], { cwd: fresh, home: fresh });
+        expect(d.code).toBe(1);
+        expect(d.out).toContain("run `brain setup`");
+        expect(d.out).toContain("some required checks failed");
+        expect(d.out).toContain("[skip] live check");
+        expect(d.out).toContain("not inside a knowledge repo");
+
+        const chat = run(["chat", "--once", "hi"], { cwd: fresh, home: fresh });
+        expect(chat.code).toBe(1);
+        expect(chat.err.trim()).toBe("no model configured; run `brain setup`");
+        expect(chat.err).not.toContain("    at "); // no stack trace
+
+        const j = run(["doctor", "--offline", "--json"], { cwd: fresh, home: fresh });
+        expect(j.code).toBe(1);
+        const parsed = JSON.parse(j.out);
+        expect(parsed.ok).toBe(false);
+        expect(parsed.checks.find((c: { name: string }) => c.name === "git").status).toBe("ok");
+      } finally {
+        rmSync(fresh, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "setup --yes writes $BRAIN_HOME/config.toml (0600, key masked in output), then doctor --offline passes",
+    () => {
+      const setupHome = mkdtempSync(join(tmpdir(), "brain-cli-setup-"));
+      try {
+        const s = run(["setup", "--yes", "--provider", "openrouter", "--key", KEY, "--offline"], { cwd: setupHome, home: setupHome });
+        expect(s.code).toBe(0);
+        expect(s.out).toContain(`wrote ${join(setupHome, "config.toml")} (mode 0600)`);
+        expect(s.out).toContain("sk-or-…abcd");
+        expect(s.out).not.toContain(KEY);
+        expect(s.err).not.toContain(KEY);
+        expect(s.out).toContain("model:      openrouter / anthropic/claude-sonnet-4.5");
+        expect(s.out).toContain("embeddings: openrouter / openai/text-embedding-3-small (1536 dims)");
+        expect(s.out).toContain("all required checks passed");
+
+        const cfgPath = join(setupHome, "config.toml");
+        expect(statSync(cfgPath).mode & 0o777).toBe(0o600);
+        const text = readFileSync(cfgPath, "utf8");
+        expect(text).toContain('provider = "openrouter"');
+        expect(text).toContain(`openrouter = "${KEY}"`);
+        expect(text).toContain("dims = 1536");
+
+        const d = run(["doctor", "--offline"], { cwd: setupHome, home: setupHome });
+        expect(d.code).toBe(0);
+        expect(d.out).toContain("[ok]   config");
+        expect(d.out).toContain("sk-or-…abcd");
+        expect(d.out).not.toContain(KEY);
+        expect(d.out).toContain("all required checks passed");
+
+        // environment wins over the file
+        const e = run(["doctor", "--offline", "--json"], { cwd: setupHome, home: setupHome, env: { BRAIN_MODEL: "env/model" } });
+        expect(JSON.parse(e.out).checks.find((c: { name: string }) => c.name === "model provider").detail).toContain("env/model");
+
+        // re-running with a different provider keeps the old key and never overwrites it with an empty answer
+        const a = run(["setup", "--yes", "--provider", "anthropic", "--key", "sk-ant-api03-cli0000WXYZ", "--offline"], { cwd: setupHome, home: setupHome });
+        expect(a.code).toBe(0);
+        expect(a.out).toContain("sk-ant-…WXYZ");
+        expect(a.out).toContain("embeddings: hashing (offline)");
+        expect(a.out).toContain("Anthropic has no embeddings endpoint");
+        expect(a.out).toContain("--embeddings openrouter");
+        const text2 = readFileSync(cfgPath, "utf8");
+        expect(text2).toContain(`openrouter = "${KEY}"`);
+        expect(text2).toContain('anthropic = "sk-ant-api03-cli0000WXYZ"');
+        expect(text2).toContain('provider = "anthropic"');
+        const again = run(["setup", "--yes", "--provider", "anthropic", "--offline"], { cwd: setupHome, home: setupHome });
+        expect(again.code).toBe(0);
+        expect(readFileSync(cfgPath, "utf8")).toContain('anthropic = "sk-ant-api03-cli0000WXYZ"');
+
+        // a non-integer --dims is rejected before anything is written; no key at all is a usage error
+        const badDims = run(["setup", "--yes", "--provider", "openrouter", "--key", KEY, "--dims", "zero", "--offline"], { cwd: setupHome, home: setupHome });
+        expect(badDims.code).toBe(1);
+        expect(badDims.err).toContain("--dims");
+        expect(readFileSync(cfgPath, "utf8")).toContain('provider = "anthropic"'); // untouched
+        const noKey = run(["setup", "--yes", "--provider", "openrouter", "--offline"], { cwd: mkdtempSync(join(tmpdir(), "brain-cli-nokey-")), home: mkdtempSync(join(tmpdir(), "brain-cli-nokey-home-")) });
+        expect(noKey.code).toBe(2);
+        expect(noKey.err).toContain("--key");
+
+        // a malformed config is a warning, not a crash
+        const malformedHome = mkdtempSync(join(tmpdir(), "brain-cli-malformed-"));
+        Bun.write(join(malformedHome, "config.toml"), "[model\n");
+        const m = run(["doctor", "--offline"], { cwd: malformedHome, home: malformedHome });
+        expect(m.err).toContain("malformed");
+        expect(m.code).toBe(1);
+      } finally {
+        rmSync(setupHome, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "doctor inside a knowledge repo reports repo_id, heads, queue and watch state",
+    () => {
+      const d = run(["doctor", "--offline"], { cwd: join(repo, "knowledge"), env: { OPENROUTER_API_KEY: KEY } });
+      expect(d.code).toBe(0);
+      expect(d.out).toMatch(/repo_id [0-7][0-9A-HJKMNP-TV-Z]{25}/);
+      expect(d.out).toMatch(/heads\s+main [0-9a-f]{12}\s+agent [0-9a-f]{12}/);
+      expect(d.out).toContain("queue");
+      expect(d.out).toContain("watch");
+      expect(d.out).toContain("unknown (no ");
+      expect(d.out).toContain("watch.pid");
+      const missing = run(["doctor", "--offline", "--repo", join(repo, "nope")], { env: { OPENROUTER_API_KEY: KEY } });
+      expect(missing.code).toBe(1);
+      expect(missing.err).toContain("brain.toml");
+    },
+    60_000,
+  );
 });

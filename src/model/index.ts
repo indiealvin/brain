@@ -1,5 +1,6 @@
 /**
- * Provider factories. Environment:
+ * Provider factories. Environment (`brain setup` writes `$BRAIN_HOME/config.toml`,
+ * which the CLI projects onto unset variables at startup; see src/config/userConfig.ts):
  *   BRAIN_MODEL_PROVIDER  anthropic | openrouter. Default: anthropic, unless only
  *                         OPENROUTER_API_KEY is set (then openrouter).
  *   BRAIN_MODEL           model id. Default claude-opus-5-5 (anthropic) or
@@ -7,7 +8,9 @@
  *   BRAIN_EFFORT          anthropic: low | medium | high | xhigh | max (default high)
  *                         openrouter: low | medium | high → `reasoning.effort`; unset = omit.
  *   OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional override)
- *   BRAIN_EMBEDDINGS      hashing (default) | openrouter
+ *   BRAIN_EMBEDDINGS      hashing | openrouter. Default: openrouter when the model
+ *                         provider resolves to openrouter, hashing otherwise
+ *                         (Anthropic has no embeddings endpoint).
  *   BRAIN_EMBEDDING_MODEL openrouter embedding model (default openai/text-embedding-3-small)
  *   BRAIN_EMBEDDING_DIMS  its output size (default 1536)
  */
@@ -72,12 +75,22 @@ export function createModelProvider(env: NodeJS.ProcessEnv = process.env): Model
 }
 
 /**
- * Embeddings. Anthropic has no embeddings endpoint, so the default is the
- * deterministic hashing provider (offline; semantic signal weak but stable).
- * `BRAIN_EMBEDDINGS=openrouter` uses OpenRouter's /embeddings endpoint.
+ * Embeddings. When `BRAIN_EMBEDDINGS` is unset the default follows the model
+ * provider: `openrouter` (its /embeddings endpoint) when the model provider
+ * resolves to openrouter, otherwise the deterministic hashing provider
+ * (offline; semantic signal weak but stable) — Anthropic has no embeddings
+ * endpoint.
  */
+export function defaultEmbeddingsKind(env: NodeJS.ProcessEnv = process.env): "hashing" | "openrouter" {
+  try {
+    return resolveProviderKind(env) === "openrouter" ? "openrouter" : "hashing";
+  } catch {
+    return "hashing"; // a bad BRAIN_MODEL_PROVIDER is reported where the model is created, not here
+  }
+}
+
 export function createEmbeddingProvider(env: NodeJS.ProcessEnv = process.env): EmbeddingProvider {
-  const kind = envOr("BRAIN_EMBEDDINGS", "hashing", env);
+  const kind = envOr("BRAIN_EMBEDDINGS", defaultEmbeddingsKind(env), env);
   if (kind === "hashing") return new HashingEmbeddingProvider();
   if (kind === "openrouter") {
     const apiKey = envOr("OPENROUTER_API_KEY", "", env);

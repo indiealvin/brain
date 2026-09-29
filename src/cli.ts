@@ -12,9 +12,21 @@
  * its summary is printed when it arrives. The process never exits with a
  * knowledge update in flight.
  */
-import { existsSync } from "node:fs";
+import pkg from "../package.json" with { type: "json" };
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
+import { formatDoctorReport, runDoctor, WATCH_PID_FILE } from "./config/doctor";
+import {
+  applyUserConfigToEnv,
+  loadUserConfig,
+  maskKey,
+  saveUserConfig,
+  type EmbeddingsProviderName,
+  type ModelProviderName,
+  type UserConfig,
+} from "./config/userConfig";
 import { openConversationStore } from "./conversation/store";
 import { openCoordinator } from "./core/coordinator";
 import type { ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
@@ -22,7 +34,8 @@ import { rebuildIndex } from "./index/reconcile";
 import { noteById } from "./index/queries";
 import { indexedCommitOf, openIndex } from "./index/schema";
 import { CONFIG_FILE, initKnowledgeRepo } from "./markdown/repo";
-import { createEmbeddingProvider, createModelProvider } from "./model";
+import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./model";
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
 import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
 import { runTurn } from "./pipeline/session";
@@ -32,9 +45,18 @@ import { fastForwardAgentToMain } from "./git/worktree";
 import { startHumanSyncWatcher } from "./sync/humanSync";
 import { withRepoWorktreeLock } from "./sync/lock";
 
+const USER_CONFIG_FILE_HINT = "$BRAIN_HOME/config.toml";
+
 export const USAGE = `usage: brain <command> [options]
 
 commands:
+  setup [--provider anthropic|openrouter] [--key <key>] [--model <id>]
+        [--embeddings hashing|openrouter] [--embedding-model <id>] [--dims <n>]
+        [--yes] [--offline]            write ${USER_CONFIG_FILE_HINT}; prompts on a TTY,
+                                     flags override prompts, --yes accepts defaults;
+                                     then runs the doctor checks
+  doctor [--offline]                 check git, BRAIN_HOME, config, keys, live model access
+                                     and (inside a repo) heads/queue/watch; exit 1 on failure
   init [dir]                         create or repair a knowledge repo (default: cwd)
   status                             heads, queue counts, pending proposals, indexed commit
   sync                               run one Human Sync pass (commit quiescent edits on main)
@@ -55,10 +77,14 @@ options:
   --repo <dir>   knowledge repo (default: walk up from cwd to find ${CONFIG_FILE})
   --json         machine-readable output where sensible
   -h, --help     this text
+  --version      print version
 
 environment:
+  BRAIN_HOME           app state and ${USER_CONFIG_FILE_HINT} (default ~/.brain)
   BRAIN_MODEL_MOCK=1   chat without credentials: canned reply, no knowledge extraction
-  BRAIN_MODEL, BRAIN_EFFORT, BRAIN_EMBEDDINGS   see src/model/index.ts
+  OPENROUTER_API_KEY, ANTHROPIC_API_KEY, BRAIN_MODEL_PROVIDER, BRAIN_MODEL, BRAIN_EFFORT,
+  BRAIN_EMBEDDINGS, BRAIN_EMBEDDING_MODEL, BRAIN_EMBEDDING_DIMS
+                       override the config file (environment always wins)
 `;
 
 // ---------------------------------------------------------------------------
@@ -71,7 +97,9 @@ export interface ParsedArgs {
 }
 
 /** `--k v`, `--k=v`, `--flag` (boolean when followed by another flag or nothing), `-h`. */
-export function parseArgs(argv: string[], valueFlags: readonly string[] = ["repo", "limit", "note", "interval", "session", "once"]): ParsedArgs {
+export const VALUE_FLAGS: readonly string[] = ["repo", "limit", "note", "interval", "session", "once", "provider", "key", "model", "embeddings", "embedding-model", "dims"];
+
+export function parseArgs(argv: string[], valueFlags: readonly string[] = VALUE_FLAGS): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i++) {
@@ -421,6 +449,14 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
   const intervalMs = flagInt(args.flags, "interval", 1000);
   const { coord } = await openRepo(args.flags);
   const clock = { now: () => Date.now() };
+  // `brain doctor` reads this to tell whether a daemon is running for the repo.
+  const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
+  try {
+    mkdirSync(coord.paths.runtimeDir, { recursive: true });
+    writeFileSync(pidFile, `${process.pid}\n`);
+  } catch (e) {
+    io.err(`warning: cannot write ${pidFile}: ${e instanceof Error ? e.message : String(e)}`);
+  }
   io.err(`watching ${coord.paths.userWorktree} (interval ${intervalMs}ms); Ctrl-C to stop`);
   const syncWatcher = startHumanSyncWatcher(coord.paths, coord.config, clock, intervalMs, async (now) => {
     const r = await coord.syncOnce(now);
@@ -451,8 +487,15 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
+  try {
+    unlinkSync(pidFile);
+  } catch {}
   await coord.close();
   io.err("stopped");
+}
+
+function hasModelCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some((k) => (env[k] ?? "").trim() !== "");
 }
 
 function chatModelProvider(io: Io): ModelProvider {
@@ -460,7 +503,12 @@ function chatModelProvider(io: Io): ModelProvider {
     io.err("BRAIN_MODEL_MOCK is set: using the mock model (canned reply, no knowledge extraction)");
     return createMockModelProvider();
   }
-  return createModelProvider();
+  if (!hasModelCredentials()) throw new CliError("no model configured; run `brain setup`");
+  try {
+    return createModelProvider();
+  } catch (e) {
+    throw new CliError(`${e instanceof Error ? e.message : String(e)}; run \`brain setup\` or \`brain doctor\``);
+  }
 }
 
 /**
@@ -581,6 +629,172 @@ async function chatRepl(
 }
 
 // ---------------------------------------------------------------------------
+// setup / doctor (first-run configuration; src/config)
+// ---------------------------------------------------------------------------
+
+/** `--repo <dir>` (must exist) or the nearest brain.toml above cwd; null when neither. */
+function resolveRepoOrNull(flags: ParsedArgs["flags"]): string | null {
+  return flagString(flags, "repo") !== undefined ? resolveRepo(flags) : findRepoRoot(process.cwd());
+}
+
+/** One line from the terminal; the prompt goes to stderr so stdout stays machine-readable. */
+function ask(question: string, dflt: string): Promise<string> {
+  return new Promise((done) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: process.stdin.isTTY === true });
+    rl.question(`${question}${dflt ? ` [${dflt}]` : ""}: `, (answer) => {
+      rl.close();
+      const a = answer.trim();
+      done(a === "" ? dflt : a);
+    });
+  });
+}
+
+/**
+ * Read a secret without echo: readline in terminal mode echoes typed
+ * characters to `output`, so a discarding stream hides them while line
+ * editing (backspace) keeps working. Falls back to a plain line off a pipe.
+ */
+function askHidden(question: string): Promise<string> {
+  return new Promise((done) => {
+    const tty = process.stdin.isTTY === true;
+    process.stderr.write(question);
+    const muted = new Writable({ write: (_chunk, _enc, cb) => cb() });
+    const rl = createInterface({ input: process.stdin, output: tty ? muted : undefined, terminal: tty });
+    rl.question("", (answer) => {
+      rl.close();
+      if (tty) process.stderr.write("\n");
+      done(answer.trim());
+    });
+  });
+}
+
+function parseChoice<T extends string>(flag: string, raw: string | undefined, allowed: readonly T[]): T | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (!allowed.includes(v as T)) throw new CliError(`--${flag} must be one of ${allowed.join(" | ")}; got ${JSON.stringify(raw)}`, 2);
+  return v as T;
+}
+
+const MODEL_PROVIDERS = ["anthropic", "openrouter"] as const;
+const EMBEDDING_PROVIDERS = ["hashing", "openrouter"] as const;
+
+/**
+ * `brain setup`: interactive on a TTY (current values as defaults), flag-driven
+ * otherwise; flags always override prompts and `--yes` accepts every default.
+ * Writes `$BRAIN_HOME/config.toml` (mode 0600), then runs the doctor checks
+ * against the new file (with the *startup* environment layered on top, so a
+ * previously loaded config never shadows what was just saved).
+ */
+async function cmdSetup(args: ParsedArgs, io: Io, startupEnv: NodeJS.ProcessEnv): Promise<number> {
+  const f = args.flags;
+  const existing: UserConfig = loadUserConfig({ warn: io.err }) ?? {};
+  const yes = f["yes"] === true;
+  const interactive = !yes && process.stdin.isTTY === true;
+  const keyFlag = flagString(f, "key");
+  if (f["key"] === true || (keyFlag !== undefined && keyFlag.trim() === "")) throw new CliError("setup: --key needs a value", 2);
+
+  // provider: flag > existing file > key prefix > openrouter
+  let provider: ModelProviderName =
+    parseChoice("provider", flagString(f, "provider"), MODEL_PROVIDERS) ??
+    existing.model?.provider ??
+    (keyFlag?.startsWith("sk-ant-") ? "anthropic" : "openrouter");
+  if (interactive && flagString(f, "provider") === undefined) {
+    provider = parseChoice("provider", await ask("model provider (anthropic | openrouter)", provider), MODEL_PROVIDERS)!;
+  }
+  const sameProvider = existing.model?.provider === provider;
+
+  // key: flag > prompt (blank keeps the existing one) > existing file > environment
+  const envKeyName = provider === "openrouter" ? "OPENROUTER_API_KEY" : "ANTHROPIC_API_KEY";
+  const existingKey = existing.keys?.[provider];
+  let key = keyFlag?.trim();
+  if (key === undefined && interactive) {
+    const hint = existingKey ? ` [keep ${maskKey(existingKey)}]` : "";
+    key = await askHidden(`${provider} API key (${envKeyName}, input hidden)${hint}: `);
+  }
+  if (!key) key = existingKey; // never overwrite an existing key with an empty answer
+  const envKey = (startupEnv[envKeyName] ?? "").trim() || (provider === "anthropic" ? (startupEnv["ANTHROPIC_AUTH_TOKEN"] ?? "").trim() : "");
+  if (!key && !envKey) throw new CliError(`setup: no ${provider} key; pass --key <key> (or set ${envKeyName})`, 2);
+
+  // model
+  const defaultModel = provider === "openrouter" ? DEFAULT_OPENROUTER_MODEL : DEFAULT_MODEL;
+  let model = flagString(f, "model")?.trim() || (sameProvider ? existing.model?.model : undefined) || defaultModel;
+  if (interactive && flagString(f, "model") === undefined) model = await ask("model id", model);
+
+  // embeddings (Anthropic has no embeddings endpoint → hashing unless told otherwise)
+  const defaultEmbeddings: EmbeddingsProviderName = provider === "openrouter" ? "openrouter" : "hashing";
+  let embeddings: EmbeddingsProviderName =
+    parseChoice("embeddings", flagString(f, "embeddings"), EMBEDDING_PROVIDERS) ?? (sameProvider ? existing.embeddings?.provider : undefined) ?? defaultEmbeddings;
+  if (interactive && flagString(f, "embeddings") === undefined) {
+    if (provider === "anthropic") io.err("note: Anthropic has no embeddings endpoint; `openrouter` embeddings need an OpenRouter key, `hashing` works offline");
+    embeddings = parseChoice("embeddings", await ask("embeddings (hashing | openrouter)", embeddings), EMBEDDING_PROVIDERS)!;
+  }
+  let embeddingModel = flagString(f, "embedding-model")?.trim() || existing.embeddings?.model || DEFAULT_OPENROUTER_EMBEDDING_MODEL;
+  let dims = flagInt(f, "dims", existing.embeddings?.dims ?? DEFAULT_OPENROUTER_EMBEDDING_DIMS);
+  let openrouterKey = existing.keys?.openrouter;
+  if (provider === "openrouter" && key) openrouterKey = key;
+  if (embeddings === "openrouter") {
+    if (interactive && flagString(f, "embedding-model") === undefined) embeddingModel = await ask("embedding model id", embeddingModel);
+    if (interactive && flagString(f, "dims") === undefined) {
+      const d = Number.parseInt(await ask("embedding dims", String(dims)), 10);
+      if (!Number.isFinite(d)) throw new CliError("dims must be an integer", 2);
+      dims = d;
+    }
+    if (provider === "anthropic" && !openrouterKey && interactive) {
+      const k = await askHidden("OpenRouter API key for embeddings (OPENROUTER_API_KEY, input hidden): ");
+      if (k) openrouterKey = k;
+    }
+  }
+  if (!Number.isInteger(dims) || dims <= 0) throw new CliError(`--dims must be a positive integer, got ${dims}`, 2);
+
+  const cfg: UserConfig = {
+    model: { provider, model, effort: sameProvider ? existing.model?.effort : undefined },
+    keys: {
+      openrouter: openrouterKey,
+      anthropic: provider === "anthropic" && key ? key : existing.keys?.anthropic,
+    },
+    embeddings: embeddings === "openrouter" ? { provider: "openrouter", model: embeddingModel, dims } : { provider: "hashing" },
+  };
+  const path = saveUserConfig(cfg);
+
+  const savedKey = cfg.keys?.[provider];
+  const lines = [
+    `wrote ${path} (mode 0600)`,
+    `model:      ${provider} / ${model}`,
+    `key:        ${savedKey ? maskKey(savedKey) : `(from ${envKeyName} in the environment)`}`,
+    `embeddings: ${embeddings === "openrouter" ? `openrouter / ${embeddingModel} (${dims} dims)` : "hashing (offline)"}`,
+  ];
+  if (provider === "anthropic" && embeddings === "hashing") {
+    lines.push("note: Anthropic has no embeddings endpoint, so semantic search uses the offline hashing embedder.", "      For better semantic search: `brain setup --embeddings openrouter --key <openrouter-key>` (with --provider anthropic keeps the Anthropic model).");
+  }
+  if (embeddings === "openrouter" && !cfg.keys?.openrouter && !(startupEnv["OPENROUTER_API_KEY"] ?? "").trim()) {
+    lines.push("warning: embeddings=openrouter but no OpenRouter key is configured; set one with `brain setup --embeddings openrouter --provider openrouter --key <key>` or use --embeddings hashing");
+  }
+
+  // doctor against the file just written (startup env wins over it, as at every launch)
+  let repoRoot: string | null = null;
+  try {
+    repoRoot = resolveRepoOrNull(f);
+  } catch {}
+  const report = await runDoctor({ env: applyUserConfigToEnv(cfg, { ...startupEnv }), repoRoot, offline: f["offline"] === true });
+  emit(
+    io,
+    {
+      path,
+      config: { ...cfg, keys: { openrouter: cfg.keys?.openrouter ? maskKey(cfg.keys.openrouter) : undefined, anthropic: cfg.keys?.anthropic ? maskKey(cfg.keys.anthropic) : undefined } },
+      doctor: report,
+    },
+    () => [...lines, "", formatDoctorReport(report)].join("\n"),
+  );
+  return 0;
+}
+
+async function cmdDoctor(args: ParsedArgs, io: Io): Promise<number> {
+  const report = await runDoctor({ offline: args.flags["offline"] === true, repoRoot: resolveRepoOrNull(args.flags) });
+  emit(io, report, () => formatDoctorReport(report));
+  return report.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -588,6 +802,10 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
   const args = parseArgs(argv);
   io.json = args.flags["json"] === true;
   const cmd = args.positional[0];
+  if (args.flags["version"] === true || cmd === "version") {
+    io.out(`brain ${pkg.version}`);
+    return 0;
+  }
   if (args.flags["help"] === true || cmd === "help") {
     io.out(USAGE);
     return 0;
@@ -596,8 +814,17 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
     io.err(USAGE);
     return 2;
   }
+  // First-run configuration: project $BRAIN_HOME/config.toml onto unset environment
+  // variables before any provider is created. `setup` works from the raw environment
+  // so an existing file never shadows the values it is about to write.
+  const startupEnv: NodeJS.ProcessEnv = { ...process.env };
+  if (cmd !== "setup") applyUserConfigToEnv(loadUserConfig({ warn: io.err }));
   try {
     switch (cmd) {
+      case "setup":
+        return await cmdSetup(args, io, startupEnv);
+      case "doctor":
+        return await cmdDoctor(args, io);
       case "init":
         await cmdInit({ ...args, positional: args.positional.slice(1) }, io);
         return 0;

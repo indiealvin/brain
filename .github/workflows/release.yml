@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-linux-x64
+            asset: brain-linux-x64
+          - target: bun-linux-arm64
+            asset: brain-linux-arm64
+          - target: bun-darwin-arm64
+            asset: brain-darwin-arm64
+          - target: bun-darwin-x64
+            asset: brain-darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - name: compile
+        run: |
+          mkdir -p dist
+          bun build --compile --minify --target=${{ matrix.target }} src/cli.ts --outfile dist/brain
+          cd dist
+          tar -czf ${{ matrix.asset }}.tar.gz brain
+          sha256sum ${{ matrix.asset }}.tar.gz > ${{ matrix.asset }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}.tar.gz
+            dist/${{ matrix.asset }}.tar.gz.sha256
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com
+
+  release:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: smoke-test linux binary
+        run: |
+          tar -xzf assets/brain-linux-x64.tar.gz -C assets
+          export BRAIN_HOME=$(mktemp -d)
+          assets/brain --version
+          assets/brain init /tmp/smoke-notes
+          cd /tmp/smoke-notes && BRAIN_MODEL_MOCK=1 "$GITHUB_WORKSPACE/assets/brain" chat --once hello --wait
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            assets/*.tar.gz
+            assets/*.sha256
+            scripts/install.sh
+          generate_release_notes: true

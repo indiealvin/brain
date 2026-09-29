@@ -163,8 +163,12 @@ describe("provider factories", () => {
 
   test("createEmbeddingProvider returns the hashing provider by default and rejects unknown kinds", () => {
     const prev = process.env.BRAIN_EMBEDDINGS;
+    const prevKind = process.env.BRAIN_MODEL_PROVIDER;
     try {
       delete process.env.BRAIN_EMBEDDINGS;
+      // the default follows the model provider (openrouter → openrouter embeddings); an
+      // OPENROUTER_API_KEY in .env would otherwise flip it, so pin anthropic here.
+      process.env.BRAIN_MODEL_PROVIDER = "anthropic";
       const e = createEmbeddingProvider();
       expect(e.model).toBe("hashing-v1");
       expect(e.dims).toBe(256);
@@ -173,6 +177,8 @@ describe("provider factories", () => {
     } finally {
       if (prev === undefined) delete process.env.BRAIN_EMBEDDINGS;
       else process.env.BRAIN_EMBEDDINGS = prev;
+      if (prevKind === undefined) delete process.env.BRAIN_MODEL_PROVIDER;
+      else process.env.BRAIN_MODEL_PROVIDER = prevKind;
     }
   });
 });

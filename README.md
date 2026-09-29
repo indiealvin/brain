@@ -9,28 +9,47 @@ preconditions, committed on an agent branch and fast-forwarded into `main`.
 - `docs/invariants.md` — the behavioral contracts every phase preserves
 - `todo.md` — phase plan and validation status
 
-## Requirements
+## Install
 
-Bun ≥ 1.4 (bundled SQLite has FTS5), Git ≥ 2.40. A Claude API credential
-(`ANTHROPIC_API_KEY` or `ant auth login`) for `brain chat`; everything else
-runs offline.
+Single binary, no runtime to install. Needs Git ≥ 2.40 and an API key from
+OpenRouter or Anthropic.
+
+```bash
+curl -fsSL https://github.com/indiealvin/brain/releases/latest/download/install.sh | sh
+brain setup                    # provider + key, saved to ~/.brain/config.toml (mode 600)
+brain doctor                   # checks git, key, model id, embedding dims
+```
+
+macOS, Linux (x64 and arm64). Set `BRAIN_INSTALL_DIR` to change the target
+directory (default `~/.local/bin`).
 
 ## Quick start
 
 ```bash
+brain init ~/notes             # any directory becomes a knowledge repo
+cd ~/notes
+brain chat                     # REPL; /quit to exit, /proposals to list
+brain chat --once "I think Git is a trust layer for agents" --wait
+brain search "agent autonomy"
+brain proposals list
+brain watch                    # daemon: human sync + integrate loop
+```
+
+## Develop
+
+Bun ≥ 1.4 (bundled SQLite has FTS5).
+
+```bash
 bun install
 bun test                       # contract fixtures + unit tests, no network
-
-# create a knowledge repo (any directory becomes one)
-bun src/cli.ts init ~/notes
-cd ~/notes
-bun /path/to/brain/src/cli.ts status
-bun /path/to/brain/src/cli.ts chat            # REPL; /quit to exit
-bun /path/to/brain/src/cli.ts chat --once "I think Git is a trust layer for agents" --wait
-bun /path/to/brain/src/cli.ts search "agent autonomy"
-bun /path/to/brain/src/cli.ts proposals list
-bun /path/to/brain/src/cli.ts watch           # daemon: human sync + integrate loop
+bunx tsc --noEmit
+bun src/cli.ts --help          # run from source
+bun run build                  # dist/brain single binary for this machine
 ```
+
+Releases: push a tag `vX.Y.Z`; `.github/workflows/release.yml` cross-compiles
+four targets, smoke-tests the Linux binary, and publishes the assets plus
+`install.sh`.
 
 `BRAIN_HOME` (default `~/.brain`) holds all derived state per repo:
 `index.sqlite`, `queue.sqlite`, `proposals.sqlite`, `conversations/`, the
@@ -40,10 +59,13 @@ recreates the index from Git.
 Environment: `BRAIN_MODEL_PROVIDER` (`anthropic` | `openrouter`; auto-picks
 `openrouter` when only `OPENROUTER_API_KEY` is set), `BRAIN_MODEL` (default
 `claude-opus-5-5` or `anthropic/claude-sonnet-4.5` on OpenRouter),
-`BRAIN_EFFORT`, `BRAIN_EMBEDDINGS` (`hashing` | `openrouter`),
+`BRAIN_EFFORT`, `BRAIN_EMBEDDINGS` (`hashing` | `openrouter`; defaults to
+`openrouter` when the model provider is OpenRouter, `hashing` otherwise),
 `BRAIN_EMBEDDING_MODEL`, `BRAIN_EMBEDDING_DIMS`, `BRAIN_MODEL_MOCK=1` (canned
-model for smoke tests). Put keys in a `.env` (gitignored) and run
-`bun --env-file=.env src/cli.ts …`.
+model for smoke tests). Environment variables override `~/.brain/config.toml`
+(written by `brain setup`; `brain doctor --offline` shows the effective values).
+When developing from source you can also put them in a `.env` (gitignored)
+and run `bun --env-file=.env src/cli.ts …`.
 
 Using OpenRouter only:
 
