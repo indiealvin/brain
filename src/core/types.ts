@@ -382,13 +382,22 @@ export type OpenCoordinator = (userWorktree: string, opts?: { clock?: Clock }) =
 // Model / embedding providers (Phases 7–11)
 // ---------------------------------------------------------------------------
 
+export interface ModelCompleteInput {
+  system: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  maxTokens?: number;
+}
+
 export interface ModelProvider {
   /** Returns raw text; callers parse/validate. */
-  complete(input: {
-    system: string;
-    messages: { role: "user" | "assistant"; content: string }[];
-    maxTokens?: number;
-  }): Promise<string>;
+  complete(input: ModelCompleteInput): Promise<string>;
+  /**
+   * Optional streaming variant: calls `onDelta` with each text chunk as it
+   * arrives and resolves with the full text (identical to what `complete`
+   * would return). Providers without native streaming may omit it; callers
+   * fall back to `complete`.
+   */
+  stream?(input: ModelCompleteInput, onDelta: (text: string) => void): Promise<string>;
 }
 
 export interface EmbeddingProvider {
