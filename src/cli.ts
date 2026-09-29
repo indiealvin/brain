@@ -518,6 +518,30 @@ function chatModelProvider(io: Io): ModelProvider {
  * prompt — that is the intended async UX). Every in-flight update is awaited
  * before the process exits (a CLI must not exit with a mutation in flight).
  */
+
+/**
+ * Terminal wait indicator. Only animates when stderr is a TTY (tests and
+ * pipes see nothing); frames are written with \r and cleared on completion.
+ */
+async function withSpinner<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  if (process.stderr.isTTY !== true) return fn();
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const started = Date.now();
+  let i = 0;
+  const draw = () => {
+    const secs = Math.floor((Date.now() - started) / 1000);
+    process.stderr.write(`\r\x1b[2K${frames[i++ % frames.length]} ${label}${secs >= 3 ? ` (${secs}s)` : ""}`);
+  };
+  draw();
+  const timer = setInterval(draw, 80);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+    process.stderr.write("\r\x1b[2K");
+  }
+}
+
 async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   const once = flagString(args.flags, "once");
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
@@ -544,14 +568,15 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
     };
 
     if (once !== undefined) {
-      const r = track(await runTurn(deps, sessionId, once));
+      const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, once)));
       if (io.json) {
         const knowledge = await r.knowledge;
         emit(io, { sessionId, reply: r.reply, contextNotes: r.contextNotes, knowledge, summary: formatKnowledgeSummary(knowledge) }, () => "");
         return;
       }
       io.out(r.reply);
-      const knowledge = await r.knowledge; // never rejects; always awaited before exit
+      // never rejects; always awaited before exit
+      const knowledge = await withSpinner("updating knowledge…", () => r.knowledge);
       if (wait) io.out(formatKnowledgeSummary(knowledge));
       for (const e of knowledge.errors) io.err(`knowledge: ${e}`);
       return;
@@ -600,8 +625,9 @@ async function chatRepl(
       return;
     }
     try {
-      const r = track(await runTurn(deps, sessionId, text));
+      const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, text)));
       io.out(r.reply);
+      if (process.stderr.isTTY === true) io.err("\x1b[2m… updating knowledge in the background; the summary will appear when it finishes\x1b[0m");
       void r.knowledge.then((u) => {
         say(formatKnowledgeSummary(u));
         for (const e of u.errors) io.err(`knowledge: ${e}`);
