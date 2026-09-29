@@ -14,6 +14,7 @@ import {
   revParse,
   isClean,
   commitsWithMutationId,
+  filesInCommit,
   trailer,
   type Env,
 } from "../harness";
@@ -62,7 +63,7 @@ describe("executor rules beyond the contract fixtures", () => {
     expect(trailer(env.repo.path, sha, "Actor")).toBe("agent");
   });
 
-  test("a declared target whose write is byte-identical is a write-set mismatch (strict equality)", async () => {
+  test("a declared target whose write is byte-identical is tolerated (partial NOOP, spec §12 step 9)", async () => {
     env = await setupEnv();
     const x = seedNote(env, "knowledge/x.md", { title: "X" });
     const y = seedNote(env, "knowledge/y.md", { title: "Y" });
@@ -80,9 +81,12 @@ describe("executor rules beyond the contract fixtures", () => {
     });
     await env.coord.enqueue(m);
     const r = await env.coord.execute(m.mutationId);
-    expect(r.state).toBe("FAILED_INVALID_EXECUTION");
-    expect(revParse(env.repo.path, AGENT_BRANCH)).toBe(mainSha);
+    expect(r.state).toBe("COMMITTED");
+    expect(revParse(env.repo.path, AGENT_BRANCH)).not.toBe(mainSha);
     expect(isClean(env.coord.paths.agentWorktree)).toBe(true);
+    const sha = commitsWithMutationId(env.repo.path, AGENT_BRANCH, m.mutationId)[0]!;
+    expect(filesInCommit(env.repo.path, sha)).toEqual([x.path]);
+    expect(fileAt(env.repo.path, AGENT_BRANCH, y.path)).toBe(y.content);
   });
 
   test("CREATE with a write whose basename is not the absent slug is invalid; a colliding slug fails validation", async () => {

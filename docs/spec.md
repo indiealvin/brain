@@ -166,7 +166,9 @@ B depends on A if any holds:
    `targetNotes(A) ∩ targetNotes(B) ≠ ∅` (by note_id, or by slug for
    CREATE).
 3. **Link target**: B's materialized content contains `[[slug]]` where slug is
-   ABSENT on the current `main` and A is a pending CREATE of that slug.
+   ABSENT on the base the pending mutations were planned against
+   (`merge-base(oldAgentHead, newMain)`, not the new main) and A is a pending
+   CREATE of that slug.
 
 Rules 2 and 3 are computed deterministically by the coordinator; the planner
 cannot opt out. Closure is transitive.

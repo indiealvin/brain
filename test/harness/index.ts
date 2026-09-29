@@ -98,8 +98,13 @@ export function isClean(repo: string): boolean {
 }
 
 export function dirtyPaths(repo: string): string[] {
-  const out = git(repo, "status", "--porcelain");
-  return out ? out.split("\n").map((l) => l.slice(3)) : [];
+  // Do not trim: an unstaged-only entry starts with a space (" M path").
+  const r = Bun.spawnSync(["git", "-C", repo, "status", "--porcelain", "-z"]);
+  const out = r.stdout.toString();
+  return out
+    .split("\0")
+    .filter(Boolean)
+    .map((l) => l.slice(3));
 }
 
 /** Commit everything as a human (simulates a manual `git commit`). */

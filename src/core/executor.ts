@@ -263,16 +263,15 @@ export async function executeMutation(ctx: ExecutorContext, mutationId: string):
     return { mutationId, state: "NOOP" };
   }
 
-  // 9. Exact write set (I-3).
+  // 9. Touched ⊆ declared write set (I-3). A declared path left
+  // byte-identical is tolerated (partial NOOP); an extra path is fatal.
   const declared = declaredWriteSet(mutation);
   const extra = [...touched].filter((p) => !declared.paths.has(p));
-  const missing = [...declared.paths].filter((p) => !touched.has(p));
-  if (declared.error || extra.length || missing.length) {
+  if (declared.error || extra.length) {
     resetAgentWorktree(paths);
     const parts: string[] = [];
     if (declared.error) parts.push(declared.error);
     if (extra.length) parts.push(`undeclared paths touched: ${extra.join(", ")}`);
-    if (missing.length) parts.push(`declared paths not touched: ${missing.join(", ")}`);
     return fail("FAILED_INVALID_EXECUTION", `WRITE_SET_MISMATCH: ${parts.join("; ")}`);
   }
 
