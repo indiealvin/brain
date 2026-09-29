@@ -72,7 +72,7 @@ Rules for every task:
 - Acceptance: `test/fixtures/rebuild.test.ts`, `sync.test.ts`, `engine.test.ts` all pass
 
 - [v] P3.6 executor step 9: tolerate declared-but-untouched paths (spec §12 amended)
-- [ ] P3.7 (perf, later) executor namespace check should use the index instead of parsing every note
+- [ ] P3.7 (perf, later; index.namespace() now exists) executor namespace check should use the index instead of parsing every note
 
 ## Phase 6 — Index
 - [v] P6.1 `src/index/schema.ts` §49; open/migrate `index.sqlite`
@@ -83,10 +83,10 @@ Rules for every task:
 - Acceptance: `test/fixtures/index.test.ts` passes
 
 ## Phase 7 — Retrieval
-- [ ] P7.1 `src/retrieval/lexical.ts` (FTS5)
-- [ ] P7.2 `src/retrieval/semantic.ts` (EmbeddingProvider; hashing provider
+- [v] P7.1 `src/retrieval/lexical.ts` (FTS5)
+- [v] P7.2 `src/retrieval/semantic.ts` (EmbeddingProvider; hashing provider
       for tests; cosine brute force)
-- [ ] P7.3 `src/retrieval/graph.ts`, `src/retrieval/hybrid.ts` rerank
+- [v] P7.3 `src/retrieval/graph.ts`, `src/retrieval/hybrid.ts` rerank
 - Acceptance: retrieval unit tests with deterministic provider; lexical
   mismatch case found via graph/semantic
 
@@ -104,9 +104,9 @@ Rules for every task:
 - Acceptance: mocked-provider tests; 3.13 end-to-end
 
 ## Phase 10 — Proposal lifecycle
-- [ ] P10.1 `src/proposal/store.ts` (`proposals.sqlite`) §33–34
-- [ ] P10.2 accept → mutation with snapshot preconditions; stale detection
-- [ ] P10.3 rejected proposals → planner negative evidence
+- [v] P10.1 `src/proposal/store.ts` (`proposals.sqlite`) §33–34
+- [v] P10.2 accept → mutation with snapshot preconditions; stale detection
+- [v] P10.3 rejected proposals → planner negative evidence
 - Acceptance: `test/fixtures/proposals.test.ts` passes
 
 ## Phase 11 — Conversation interface + Claude adapter
