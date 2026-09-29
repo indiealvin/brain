@@ -156,7 +156,7 @@ describe("provider factories", () => {
     }
   });
 
-  test("createEmbeddingProvider returns the hashing provider by default and rejects voyage for now", () => {
+  test("createEmbeddingProvider returns the hashing provider by default and rejects unknown kinds", () => {
     const prev = process.env.BRAIN_EMBEDDINGS;
     try {
       delete process.env.BRAIN_EMBEDDINGS;
@@ -164,7 +164,7 @@ describe("provider factories", () => {
       expect(e.model).toBe("hashing-v1");
       expect(e.dims).toBe(256);
       process.env.BRAIN_EMBEDDINGS = "voyage";
-      expect(() => createEmbeddingProvider()).toThrow(/not implemented/);
+      expect(() => createEmbeddingProvider()).toThrow(/unknown BRAIN_EMBEDDINGS/);
     } finally {
       if (prev === undefined) delete process.env.BRAIN_EMBEDDINGS;
       else process.env.BRAIN_EMBEDDINGS = prev;
