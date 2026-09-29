@@ -7,18 +7,25 @@
  * `reconcileIndex()`), then does its work. Repo resolution: `--repo <dir>`,
  * else walk up from cwd until a `brain.toml` is found.
  *
- * `chat` is deliberately not wired: it needs the extractor and planner
- * modules that are being built in parallel.
+ * `chat` runs the conversation pipeline (src/pipeline): the reply is
+ * printed as soon as it exists; knowledge maintenance runs afterwards and
+ * its summary is printed when it arrives. The process never exits with a
+ * knowledge update in flight.
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { openConversationStore } from "./conversation/store";
 import { openCoordinator } from "./core/coordinator";
-import type { ExecutionResult, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
+import type { ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
 import { rebuildIndex } from "./index/reconcile";
 import { noteById } from "./index/queries";
 import { indexedCommitOf, openIndex } from "./index/schema";
 import { CONFIG_FILE, initKnowledgeRepo } from "./markdown/repo";
-import { createEmbeddingProvider } from "./model";
+import { createEmbeddingProvider, createModelProvider } from "./model";
+import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
+import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
+import { runTurn } from "./pipeline/session";
 import { ensureEmbeddings } from "./retrieval/embeddings";
 import { hybridSearch } from "./retrieval/hybrid";
 import { fastForwardAgentToMain } from "./git/worktree";
@@ -39,12 +46,19 @@ commands:
   proposals accept <id>              accept a proposal (executes it)
   proposals reject <id> [--note t]   reject a proposal
   watch [--interval ms]              daemon: human sync + drain/integrate loop until SIGINT
-  chat                               (not wired yet)
+  chat [--session <id>] [--once "<text>"] [--wait]
+                                     talk to your knowledge base; REPL on stdin unless --once
+                                     (/quit, /proposals). --wait prints the knowledge summary
+                                     before exiting in --once mode (it is always awaited).
 
 options:
   --repo <dir>   knowledge repo (default: walk up from cwd to find ${CONFIG_FILE})
   --json         machine-readable output where sensible
   -h, --help     this text
+
+environment:
+  BRAIN_MODEL_MOCK=1   chat without credentials: canned reply, no knowledge extraction
+  BRAIN_MODEL, BRAIN_EFFORT, BRAIN_EMBEDDINGS   see src/model/index.ts
 `;
 
 // ---------------------------------------------------------------------------
@@ -57,7 +71,7 @@ export interface ParsedArgs {
 }
 
 /** `--k v`, `--k=v`, `--flag` (boolean when followed by another flag or nothing), `-h`. */
-export function parseArgs(argv: string[], valueFlags: readonly string[] = ["repo", "limit", "note", "interval"]): ParsedArgs {
+export function parseArgs(argv: string[], valueFlags: readonly string[] = ["repo", "limit", "note", "interval", "session", "once"]): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i++) {
@@ -441,6 +455,131 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
   io.err("stopped");
 }
 
+function chatModelProvider(io: Io): ModelProvider {
+  if (mockModelRequested()) {
+    io.err("BRAIN_MODEL_MOCK is set: using the mock model (canned reply, no knowledge extraction)");
+    return createMockModelProvider();
+  }
+  return createModelProvider();
+}
+
+/**
+ * `brain chat`: the reply is printed as soon as it exists; the knowledge
+ * update is printed when it arrives (in the REPL possibly after the next
+ * prompt — that is the intended async UX). Every in-flight update is awaited
+ * before the process exits (a CLI must not exit with a mutation in flight).
+ */
+async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
+  const once = flagString(args.flags, "once");
+  if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
+  const wait = args.flags["wait"] === true;
+  const model = chatModelProvider(io);
+  const embeddings = createEmbeddingProvider();
+  const { coord } = await openRepo(args.flags);
+  const db = openIndex(coord.paths.indexDb);
+  const inFlight = new Set<Promise<KnowledgeUpdate>>();
+  try {
+    await ensureEmbeddings(db, embeddings);
+    const store = openConversationStore(coord.paths.conversationsDir);
+    const requested = flagString(args.flags, "session");
+    if (requested !== undefined && !store.hasSession(requested)) throw new CliError(`unknown session ${requested} (conversations live in ${store.dir})`);
+    const sessionId = requested ?? store.createSession();
+    io.err(`session ${sessionId}${requested ? ` (resumed, ${store.getTurns(sessionId).length} turns)` : ""}`);
+    const deps = { coord, db, model, embeddings, config: coord.config, store };
+
+    const track = <T extends { knowledge: Promise<KnowledgeUpdate> }>(r: T): T => {
+      inFlight.add(r.knowledge);
+      void r.knowledge.finally(() => inFlight.delete(r.knowledge));
+      return r;
+    };
+
+    if (once !== undefined) {
+      const r = track(await runTurn(deps, sessionId, once));
+      if (io.json) {
+        const knowledge = await r.knowledge;
+        emit(io, { sessionId, reply: r.reply, contextNotes: r.contextNotes, knowledge, summary: formatKnowledgeSummary(knowledge) }, () => "");
+        return;
+      }
+      io.out(r.reply);
+      const knowledge = await r.knowledge; // never rejects; always awaited before exit
+      if (wait) io.out(formatKnowledgeSummary(knowledge));
+      for (const e of knowledge.errors) io.err(`knowledge: ${e}`);
+      return;
+    }
+
+    await chatRepl(deps, sessionId, io, track);
+  } finally {
+    // Drain before closing: `coord.close()` closes the queue under any in-flight submit().
+    while (inFlight.size > 0) await Promise.all([...inFlight]);
+    db.close();
+    await coord.close();
+  }
+}
+
+async function chatRepl(
+  deps: Parameters<typeof runTurn>[0],
+  sessionId: string,
+  io: Io,
+  track: <T extends { knowledge: Promise<KnowledgeUpdate> }>(r: T) => T,
+): Promise<void> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "> ", terminal: process.stdin.isTTY === true });
+  io.err("type a message; /proposals lists pending proposals; /quit or Ctrl-D exits");
+  let busy: Promise<void> = Promise.resolve();
+  let closed = false;
+
+  const say = (line: string) => {
+    io.out(line);
+    if (!closed) rl.prompt(true);
+  };
+
+  const handle = async (line: string): Promise<void> => {
+    const text = line.trim();
+    if (text === "") return;
+    if (text === "/quit" || text === "/exit") {
+      closed = true;
+      rl.close();
+      return;
+    }
+    if (text === "/proposals") {
+      const pending = (await deps.coord.listProposals()).filter((p) => p.status === "PENDING");
+      io.out(pending.length === 0 ? "no pending proposals" : pending.map(proposalLine).join("\n"));
+      return;
+    }
+    if (text.startsWith("/")) {
+      io.out(`unknown command ${text}; commands: /proposals, /quit`);
+      return;
+    }
+    try {
+      const r = track(await runTurn(deps, sessionId, text));
+      io.out(r.reply);
+      void r.knowledge.then((u) => {
+        say(formatKnowledgeSummary(u));
+        for (const e of u.errors) io.err(`knowledge: ${e}`);
+      });
+    } catch (e) {
+      io.err(`error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  await new Promise<void>((done) => {
+    rl.on("line", (line) => {
+      busy = busy.then(() => handle(line)).then(() => {
+        if (!closed) rl.prompt();
+      });
+    });
+    // Ctrl-C behaves like /quit: readline only routes it through "close" when a listener exists.
+    rl.on("SIGINT", () => {
+      closed = true;
+      rl.close();
+    });
+    rl.once("close", () => {
+      closed = true;
+      void busy.then(done, done);
+    });
+    rl.prompt();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
@@ -484,8 +623,8 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         await cmdWatch(args, io);
         return 0;
       case "chat":
-        io.err("chat is not wired yet (needs the extractor and planner; see todo.md Phase 11b)");
-        return 2;
+        await cmdChat(args, io);
+        return 0;
       default:
         io.err(`unknown command: ${cmd}\n\n${USAGE}`);
         return 2;

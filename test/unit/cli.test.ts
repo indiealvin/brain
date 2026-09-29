@@ -39,7 +39,7 @@ describe("brain CLI (Phase 11a)", () => {
   });
 
   test(
-    "init → status → index → search → proposals list → chat, end to end against a temp repo",
+    "init → status → index → search → proposals list, end to end against a temp repo",
     () => {
       // no repo yet: commands that need one fail cleanly
       const none = run(["status"], { cwd: home });
@@ -135,9 +135,7 @@ describe("brain CLI (Phase 11a)", () => {
       expect(integrate.code).toBe(0);
       expect(integrate.out).toContain("status: nothing-to-integrate");
 
-      const chat = run(["chat"]);
-      expect(chat.code).toBe(2);
-      expect(chat.err).toContain("not wired");
+      // `chat` is covered in test/unit/pipeline.test.ts (needs a model provider)
 
       const help = run(["--help"]);
       expect(help.code).toBe(0);

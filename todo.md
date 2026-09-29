@@ -91,15 +91,15 @@ Rules for every task:
   mismatch case found via graph/semantic
 
 ## Phase 8 — Extractor + validators
-- [x] P8.1 `src/extract/groundingValidator.ts` §38 (pure) — done in P2.5
-- [ ] P8.2 `src/extract/extractor.ts` behind `ModelProvider`; prompt +
+- [v] P8.1 `src/extract/groundingValidator.ts` §38 (pure) — done in P2.5
+- [v] P8.2 `src/extract/extractor.ts` behind `ModelProvider`; prompt +
       JSON schema; mocked-provider tests
 - Acceptance: extractor contract tests with mock provider
 
 ## Phase 9 — Planner
-- [ ] P9.1 `src/plan/planner.ts` behind `ModelProvider`: produces fully
+- [v] P9.1 `src/plan/planner.ts` behind `ModelProvider`: produces fully
       materialized `Mutation`s / `Proposal`s §39
-- [ ] P9.2 `src/plan/mutationValidator.ts`: permission table, status
+- [v] P9.2 `src/plan/mutationValidator.ts`: permission table, status
       protection, target declaration completeness
 - Acceptance: mocked-provider tests; 3.13 end-to-end
 
@@ -110,13 +110,22 @@ Rules for every task:
 - Acceptance: `test/fixtures/proposals.test.ts` passes
 
 ## Phase 11 — Conversation interface + Claude adapter
-- [ ] P11.1 `src/model/claude.ts` `ModelProvider` adapter (load `claude-api`
-      skill first)
-- [ ] P11.2 `src/cli.ts`: `brain init | chat | index --rebuild | proposals |
-      sync`
-- [ ] P11.3 conversation store; async knowledge-update events
+- [v] P11.1 `src/model/claude.ts` `ModelProvider` adapter (load `claude-api`
+      skill first) — Messages API with cached system prompt, effort, retries; `test/unit/claudeProvider.test.ts`
+- [v] P11.2 `src/cli.ts`: `brain init | chat | index --rebuild | proposals |
+      sync` — `chat [--session <id>] [--once "<text>"] [--wait]` wired to src/pipeline (REPL or one turn; `BRAIN_MODEL_MOCK=1` for credential-free smoke tests)
+- [v] P11.3 conversation store; async knowledge-update events — `src/pipeline/{chat,knowledge,session}.ts`: reply first, `processTurnForKnowledge` in the background emitting `KnowledgeEvent`s; `test/unit/pipeline.test.ts`
 - Acceptance: `brain chat` runs one turn end-to-end with mock provider
 
 ## Phase 12 — Dogfood + evals (not automated here)
 - [ ] P12.1 `evals/` golden sets: extraction, mutation, retrieval
 - [ ] P12.2 trust metrics from Git trailers (revert, correction, NOOP rate)
+
+## Follow-ups found during implementation (not blocking v0 exit criteria 1–11)
+- [ ] F1 RENAME_SLUG proposals: `Proposal.targets` is present-only, so a rename's new path cannot be declared; add an `absent` snapshot form (types.ts change) before enabling RENAME_SLUG.
+- [ ] F2 Prompt caching for chat: `ModelProvider.complete` takes one `system` string; split stable prefix / volatile context into two blocks so retrieved notes do not defeat the cache.
+- [ ] F3 Windowed re-extraction: turn N+1 re-sees turns of turn N; duplicates land as NOOP/REPLAN today. Track "already extracted through turn X" per session.
+- [ ] F4 Executor namespace check parses every note (P3.7); switch to `index.namespace()`.
+- [ ] F5 `notes_fts.note_id` is UNINDEXED (O(N) per lookup); align rowids or add a bodies table before 100K notes.
+- [ ] F6 Embedding provider for real use (Voyage) behind `BRAIN_EMBEDDINGS=voyage`; hashing provider is test/offline only.
+- [ ] F7 Phase 12: golden eval sets (extraction, mutation, retrieval) and trust metrics from Git trailers.
