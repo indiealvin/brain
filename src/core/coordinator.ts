@@ -8,9 +8,11 @@
  * rebuild and is never nested. No `*Unlocked` method ever re-enters the
  * mutex, so the two locks cannot deadlock.
  *
- * The index (Phase 6) and proposals (Phase 10) still throw `not implemented`.
+ * Proposals (§33–34) live in the proposal store; an accepted proposal
+ * re-enters the queue as a mutation whose preconditions are its snapshots.
  */
 import { mkdirSync } from "node:fs";
+import { basename } from "node:path";
 import { AGENT_BRANCH } from "./types";
 import type {
   BrainConfig,
@@ -30,6 +32,7 @@ import { repoPaths } from "./brainHome";
 import { executeMutation } from "./executor";
 import { integrateOnce, mainMoved } from "./integrate";
 import { openQueue, type Queue } from "./queue";
+import { openProposalStore, type ProposalStore } from "../proposal/store";
 import { rebuildAgentBranch } from "./rebuild";
 import { isClean, logGrepTrailer } from "../git/git";
 import { agentHead, ensureAgentWorktree, fastForwardAgentToMain, mainHead, resetAgentWorktree } from "../git/worktree";
@@ -42,10 +45,6 @@ import { blobAt, showFile } from "../git/git";
 import { reconcileIndex as reconcileIndexFiles } from "../index/reconcile";
 import { syncOnce as humanSyncOnce } from "../sync/humanSync";
 import { withRepoWorktreeLock } from "../sync/lock";
-
-function notImplemented(name: string, phase: number): never {
-  throw new Error(`not implemented: ${name} (phase ${phase})`);
-}
 
 /** In-process single-writer mutex: serializes execute / integrate / sync / rebuild / recover. */
 class Serial {
@@ -62,12 +61,14 @@ class Coordinator implements RepoCoordinator {
   readonly config: BrainConfig;
   readonly clock: Clock;
   private readonly queue: Queue;
+  private readonly proposals: ProposalStore;
   private readonly mutex = new Serial();
 
-  constructor(paths: RepoPaths, config: BrainConfig, queue: Queue, clock: Clock) {
+  constructor(paths: RepoPaths, config: BrainConfig, queue: Queue, proposals: ProposalStore, clock: Clock) {
     this.paths = paths;
     this.config = config;
     this.queue = queue;
+    this.proposals = proposals;
     this.clock = clock;
   }
 
@@ -238,34 +239,88 @@ class Coordinator implements RepoCoordinator {
     return agentHead(this.paths);
   }
 
-  // -- later phases ---------------------------------------------------------
+  // -- index projection API -------------------------------------------------
 
   async reconcileIndex(): Promise<ReconcileResult> {
     return this.mutex.run(() => this.reconcileIndexUnlocked());
   }
 
-  async submitProposal(_proposal: Proposal): Promise<void> {
-    return notImplemented("submitProposal", 10);
+  // -- proposals (§33–34) ---------------------------------------------------
+
+  /** I-19: mark PENDING proposals STALE when any target blob differs at agent HEAD. */
+  private refreshProposalStaleness(): string[] {
+    return this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
+  }
+
+  async submitProposal(proposal: Proposal): Promise<void> {
+    this.proposals.create(proposal);
   }
 
   async listProposals(): Promise<Proposal[]> {
-    return notImplemented("listProposals", 10);
+    return this.mutex.run(async () => {
+      this.refreshProposalStaleness();
+      return this.proposals.list();
+    });
   }
 
-  async acceptProposal(_proposalId: string): Promise<ExecutionResult> {
-    return notImplemented("acceptProposal", 10);
+  /**
+   * Accept: re-check staleness against agent HEAD (after catching up with
+   * main), then re-enter the proposal as a mutation whose preconditions are
+   * its target snapshots and run it like submit(). A stale or already
+   * resolved proposal executes nothing. If execution fails its
+   * preconditions (REPLAN) the proposal becomes STALE (§34).
+   */
+  async acceptProposal(proposalId: string): Promise<ExecutionResult> {
+    return this.mutex.run(async () => {
+      const found = this.proposals.get(proposalId);
+      if (!found) throw new Error(`acceptProposal: unknown proposal ${proposalId}`);
+      if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
+      await this.catchUpAgentBranch();
+      this.refreshProposalStaleness();
+      const p = this.proposals.get(proposalId)!;
+      if (p.status !== "PENDING") {
+        return { mutationId: p.mutationId, state: "REPLAN", error: "STALE" };
+      }
+      this.proposals.decide(proposalId, "ACCEPTED", { resolvedAt: this.nowIso() });
+      const mutation: Mutation = {
+        mutationId: p.mutationId,
+        type: p.operation,
+        summary: `${p.operation.toLowerCase()} ${p.targets.map((t) => basename(t.path)).join(", ")}`,
+        targets: p.targets.map((t) => ({ kind: "present", noteId: t.noteId, path: t.path, blobHash: t.blobHash })),
+        writes: p.writes,
+        dependsOn: [],
+        evidence: p.evidence,
+        reasoning: p.reasoning,
+      };
+      this.queue.enqueue(mutation);
+      const r = await this.executeUnlocked(mutation.mutationId);
+      if (r.state === "REPLAN") {
+        this.proposals.decide(proposalId, "STALE", { resolvedAt: this.nowIso() });
+        return r;
+      }
+      if (r.state === "COMMITTED") await this.integrateUnlocked();
+      const row = this.queue.get(mutation.mutationId);
+      return row ? { ...r, state: row.state, commitSha: row.commitSha ?? r.commitSha } : r;
+    });
   }
 
-  async rejectProposal(_proposalId: string, _decisionNote?: string): Promise<void> {
-    return notImplemented("rejectProposal", 10);
+  async rejectProposal(proposalId: string, decisionNote?: string): Promise<void> {
+    this.proposals.decide(proposalId, "REJECTED", { decisionNote, resolvedAt: this.nowIso() });
   }
 
-  async negativeEvidenceFor(_noteIds: string[]): Promise<Proposal[]> {
-    return notImplemented("negativeEvidenceFor", 10);
+  async negativeEvidenceFor(noteIds: string[]): Promise<Proposal[]> {
+    return this.proposals.negativeEvidenceFor(noteIds);
+  }
+
+  private nowIso(): string {
+    return new Date(this.clock.now()).toISOString();
   }
 
   async close(): Promise<void> {
-    await this.mutex.run(async () => this.queue.close());
+    await this.mutex.run(async () => {
+      this.queue.close();
+      this.proposals.close();
+    });
   }
 }
 
@@ -275,6 +330,7 @@ export async function openCoordinator(userWorktree: string, opts: { clock?: Cloc
   for (const dir of [paths.stateDir, paths.conversationsDir, paths.runtimeDir]) mkdirSync(dir, { recursive: true });
   ensureAgentWorktree(paths);
   const queue = openQueue(paths.queueDb);
+  const proposals = openProposalStore(paths.proposalsDb);
   const clock: Clock = opts.clock ?? { now: () => Date.now() };
-  return new Coordinator(paths, config, queue, clock);
+  return new Coordinator(paths, config, queue, proposals, clock);
 }
