@@ -23,23 +23,24 @@ Rules for every task:
 - [x] P0.5 Fixtures 3.1–3.24 written as failing tests against the seam
 
 ## Phase 1 — Contract harness green for pure helpers
-- [ ] P1.1 `src/core/brainHome.ts`: `resolveBrainHome()`, repo state paths
-- [ ] P1.2 `src/core/ids.ts`: ULID, `mut_` ids; `src/core/slug.ts`: normalize key
-- [ ] P1.3 `src/git/git.ts`: thin subprocess wrapper (`run`, `revParse`,
+- [x] P1.1 `src/core/brainHome.ts`: `resolveBrainHome()`, repo state paths
+- [x] P1.2 `src/core/ids.ts`: ULID, `mut_` ids; `src/core/slug.ts`: normalize key
+- [x] P1.3 `src/git/git.ts`: thin subprocess wrapper (`run`, `revParse`,
       `blobAt(tree, path)`, `treeHasSlug`, `log --grep`, `status --porcelain`,
       trailers parse/format)
 - Acceptance: harness compiles; fixtures fail for the right reason (missing impl)
 
 ## Phase 2 — Markdown repository
-- [ ] P2.1 `src/markdown/parse.ts`: frontmatter (id/created/type/status/aliases),
+- [x] P2.1 `src/markdown/parse.ts`: frontmatter (id/created/type/status/aliases),
       H1 title, sections, wikilinks (bare + Connections typed grammar §23)
-- [ ] P2.2 `src/markdown/serialize.ts`: round-trip stable output
-- [ ] P2.3 `src/markdown/validate.ts`: required fields, enums, namespace
+- [x] P2.2 `src/markdown/serialize.ts`: round-trip stable output
+- [x] P2.3 `src/markdown/validate.ts`: required fields, enums, namespace
       (case-insensitive slug/alias), title-change→alias rule §22, content-class
       section rules §26, low-content rule §28
-- [ ] P2.4 `src/markdown/repo.ts`: `brain init` (brain.toml, .gitignore,
+- [x] P2.4 `src/markdown/repo.ts`: `brain init` (brain.toml, .gitignore,
       AGENTS.md), load config
-- [ ] P2.5 `src/extract/groundingValidator.ts` §38 (pure; uses isLowContentTurn)
+- [ ] P2.6 preserve unknown frontmatter keys (`Frontmatter.extra`) in parse/serialize
+- [x] P2.5 `src/extract/groundingValidator.ts` §38 (pure; uses isLowContentTurn)
 - Acceptance: `test/fixtures/markdown.test.ts` and `test/fixtures/grounding.test.ts` fully pass
 
 ## Phase 3 — Git mutation engine

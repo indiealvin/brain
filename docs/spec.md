@@ -303,7 +303,10 @@ aliases: []          # may be omitted when empty
 ---
 ```
 
-Required: `id`, `created`, `type`, `status`. The H1 is the title.
+Required: `id`, `created`, `type`, `status`. The H1 is the title. Unknown
+frontmatter keys written by humans are preserved verbatim (`Frontmatter.extra`)
+and re-emitted by `serializeNote` after the known keys, so agent rewrites never
+drop them.
 
 ## 19. Note types
 
@@ -317,8 +320,9 @@ CREATE requires RECONCILE_EVOLUTION.
 
 ## 21. Slugs
 
-Filename basename without `.md`. Repo-wide unique, compared case-insensitively
-(NFC-normalized, lowercased). Never changed automatically. `RENAME_SLUG`
+Filename basename without `.md`. Repo-wide unique, compared by `slugKey`
+(NFKC→NFD, combining marks stripped, lowercased, whitespace collapsed), so
+`Café` and `cafe` collide by design. Never changed automatically. `RENAME_SLUG`
 requires explicit approval and rewrites every inbound link and adds the old
 slug as alias.
 

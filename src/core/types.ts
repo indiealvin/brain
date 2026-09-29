@@ -47,6 +47,8 @@ export interface Frontmatter {
   type: NoteType;
   status: NoteStatus;
   aliases: string[];
+  /** Unknown scalar keys written by humans, preserved verbatim in file order. */
+  extra?: Record<string, string>;
 }
 
 export interface WikiLink {
