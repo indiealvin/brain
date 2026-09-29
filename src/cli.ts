@@ -38,6 +38,7 @@ import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./m
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
 import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
+import { HashingEmbeddingProvider } from "./retrieval/embeddings";
 import { runTurn } from "./pipeline/session";
 import { ensureEmbeddings } from "./retrieval/embeddings";
 import { hybridSearch } from "./retrieval/hybrid";
@@ -522,7 +523,8 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
   const wait = args.flags["wait"] === true;
   const model = chatModelProvider(io);
-  const embeddings = createEmbeddingProvider();
+  // Mock mode must never touch the network: pair the canned model with offline embeddings.
+  const embeddings = mockModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
   const { coord } = await openRepo(args.flags);
   const db = openIndex(coord.paths.indexDb);
   const inFlight = new Set<Promise<KnowledgeUpdate>>();
