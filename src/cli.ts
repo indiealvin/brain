@@ -17,6 +17,9 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
+import { CliError } from "./cli/errors";
+import { installWatchService, uninstallWatchService, watchServiceStatus } from "./cli/service";
+import { createWatchEmbedder, resolveWatchProvider, watchTick, type WatchEmbedder } from "./cli/watch";
 import { formatDoctorReport, runDoctor, WATCH_PID_FILE } from "./config/doctor";
 import {
   applyUserConfigToEnv,
@@ -32,8 +35,8 @@ import { openCoordinator } from "./core/coordinator";
 import type { ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
 import { rebuildIndex } from "./index/reconcile";
 import { noteById } from "./index/queries";
-import { indexedCommitOf, openIndex } from "./index/schema";
-import { CONFIG_FILE, initKnowledgeRepo } from "./markdown/repo";
+import { indexedCommitOf, openIndex, type IndexDb } from "./index/schema";
+import { CONFIG_FILE, initKnowledgeRepo, loadConfig } from "./markdown/repo";
 import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./model";
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
@@ -68,7 +71,13 @@ commands:
   proposals show <id>                show one proposal
   proposals accept <id>              accept a proposal (executes it)
   proposals reject <id> [--note t]   reject a proposal
-  watch [--interval ms]              daemon: human sync + drain/integrate loop until SIGINT
+  watch [--interval ms] [--no-embeddings]
+                                     daemon: human sync + drain/integrate loop until SIGINT;
+                                     keeps embeddings fresh after every change (needs the
+                                     OpenRouter key when embeddings=openrouter; hashing is offline)
+  watch --install [--interval ms]    run the daemon as a user service for this repo
+                                     (systemd --user on Linux, launchd on macOS); one unit per repo
+  watch --uninstall | --status       stop + remove the service / report whether it is running
   chat [--session <id>] [--once "<text>"] [--wait]
                                      talk to your knowledge base; REPL on stdin unless --once
                                      (/quit, /proposals). --wait prints the knowledge summary
@@ -147,14 +156,7 @@ function flagInt(flags: ParsedArgs["flags"], name: string, dflt: number): number
   return n;
 }
 
-export class CliError extends Error {
-  readonly exitCode: number;
-  constructor(message: string, exitCode = 1) {
-    super(message);
-    this.name = "CliError";
-    this.exitCode = exitCode;
-  }
-}
+export { CliError };
 
 // ---------------------------------------------------------------------------
 // repo resolution
@@ -448,7 +450,41 @@ async function cmdProposals(args: ParsedArgs, io: Io): Promise<void> {
   }
 }
 
-async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
+/**
+ * `watch --install/--uninstall/--status` (src/cli/service.ts). Needs only
+ * brain.toml (repo_id), not an open coordinator; a missing repo is a usage
+ * error (exit 2) rather than the generic exit 1 of the other commands.
+ */
+function cmdWatchService(args: ParsedArgs, io: Io): number {
+  let repoDir: string;
+  try {
+    repoDir = resolveRepo(args.flags);
+  } catch (e) {
+    throw new CliError(`watch --install/--uninstall/--status: ${e instanceof Error ? e.message : String(e)}`, 2);
+  }
+  const repoId = loadConfig(repoDir).repoId;
+  if (args.flags["install"] === true) {
+    const r = installWatchService({ repoDir, repoId, intervalMs: flagInt(args.flags, "interval", 1000) });
+    emit(io, { installed: true, kind: r.spec.kind, path: r.spec.path, name: r.spec.name }, () => r.lines.join("\n"));
+    return 0;
+  }
+  if (args.flags["uninstall"] === true) {
+    const r = uninstallWatchService(repoId);
+    emit(io, { installed: false, kind: r.spec.kind, path: r.spec.path, name: r.spec.name }, () => r.lines.join("\n"));
+    return 0;
+  }
+  const s = watchServiceStatus(repoId);
+  emit(io, { installed: s.installed, running: s.running, kind: s.spec.kind, path: s.spec.path, name: s.spec.name }, () => s.lines.join("\n"));
+  return s.running ? 0 : 1;
+}
+
+/**
+ * `brain watch`: human-sync watcher + one `watchTick` per interval (drain,
+ * integrate, refresh embeddings when something changed). The embedding
+ * provider is created once; if that fails the daemon runs without embeddings.
+ */
+async function cmdWatch(args: ParsedArgs, io: Io): Promise<number> {
+  if (args.flags["install"] === true || args.flags["uninstall"] === true || args.flags["status"] === true) return cmdWatchService(args, io);
   const intervalMs = flagInt(args.flags, "interval", 1000);
   const { coord } = await openRepo(args.flags);
   const clock = { now: () => Date.now() };
@@ -460,27 +496,37 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
   } catch (e) {
     io.err(`warning: cannot write ${pidFile}: ${e instanceof Error ? e.message : String(e)}`);
   }
+  let db: IndexDb | null = null;
+  let embedder: WatchEmbedder | null = null;
+  if (args.flags["no-embeddings"] === true) io.err("watch: embeddings disabled (--no-embeddings)");
+  else {
+    const provider = resolveWatchProvider(() => createEmbeddingProvider(), io.err);
+    if (provider !== null) {
+      db = openIndex(coord.paths.indexDb);
+      embedder = createWatchEmbedder({ db, provider, log: io.err });
+    }
+  }
   io.err(`watching ${coord.paths.userWorktree} (interval ${intervalMs}ms); Ctrl-C to stop`);
   const syncWatcher = startHumanSyncWatcher(coord.paths, coord.config, clock, intervalMs, async (now) => {
     const r = await coord.syncOnce(now);
     if (r.committed) io.err(`human sync: committed ${short(r.sha ?? "")}`);
     return r;
   });
+  const deps = { coord, embedder, log: io.err };
   let running = false;
-  const loop = setInterval(async () => {
+  const tick = async (force: boolean) => {
     if (running) return;
     running = true;
     try {
-      const drained = await coord.drainQueued();
-      for (const d of drained) io.err(`executed ${d.mutationId}: ${d.state}`);
-      const r = await coord.integrate();
-      if (r.status !== "nothing-to-integrate") io.err(`integrate: ${r.status} main=${short(r.mainSha)}`);
+      await watchTick(deps, { force });
     } catch (e) {
       io.err(`watch loop error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       running = false;
     }
-  }, intervalMs);
+  };
+  await tick(true); // startup: embed whatever the recovery reconcile left stale
+  const loop = setInterval(() => void tick(false), intervalMs);
   await new Promise<void>((done) => {
     const stop = () => {
       clearInterval(loop);
@@ -490,11 +536,14 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<void> {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
+  while (running) await new Promise((r) => setTimeout(r, 50)); // let an in-flight tick finish before closing the db
   try {
     unlinkSync(pidFile);
   } catch {}
+  db?.close();
   await coord.close();
   io.err("stopped");
+  return 0;
 }
 
 function hasModelCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -971,8 +1020,7 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
         await cmdProposals(args, io);
         return 0;
       case "watch":
-        await cmdWatch(args, io);
-        return 0;
+        return await cmdWatch(args, io);
       case "chat":
         await cmdChat(args, io);
         return 0;

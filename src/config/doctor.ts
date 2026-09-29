@@ -10,6 +10,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
 import { resolveBrainHome } from "../core/brainHome";
 import { openCoordinator } from "../core/coordinator";
 import { DEFAULT_MODEL } from "../model/claude";
@@ -55,6 +56,8 @@ export interface DoctorOptions {
   gitVersion?: () => string | null;
   configPath?: string;
   timeoutMs?: number;
+  /** Injected for tests (platform/home); default: the real machine. Detection is file-existence only, never a shell-out. */
+  service?: Partial<ServiceEnv>;
 }
 
 function envOr(env: NodeJS.ProcessEnv, name: string, dflt = ""): string {
@@ -270,11 +273,12 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
         add("heads", "ok", `main ${main.slice(0, 12)}  agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`, false);
         add("queue", "ok", queue || "empty", false);
         const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
-        if (!existsSync(pidFile)) add("watch", "info", `unknown (no ${pidFile})`, false);
+        const service = describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service));
+        if (!existsSync(pidFile)) add("watch", "info", `unknown (no ${pidFile}); ${service}`, false);
         else {
           const pid = Number(readFileSync(pidFile, "utf8").trim());
-          if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) add("watch", "ok", `running (pid ${pid})`, false);
-          else add("watch", "warn", `not running (stale ${pidFile})`, false);
+          if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) add("watch", "ok", `running (pid ${pid}); ${service}`, false);
+          else add("watch", "warn", `not running (stale ${pidFile}); ${service}`, false);
         }
       } finally {
         await coord.close();

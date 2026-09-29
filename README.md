@@ -32,8 +32,27 @@ brain chat                     # REPL; /quit to exit, /proposals to list
 brain chat --once "I think Git is a trust layer for agents" --wait
 brain search "agent autonomy"
 brain proposals list
-brain watch                    # daemon: human sync + integrate loop
+brain watch                    # daemon: human sync + integrate loop, keeps embeddings fresh
+brain watch --install          # …as a user service (systemd --user / launchd); --status, --uninstall
 ```
+
+`brain watch` commits your quiescent edits, executes queued mutations,
+fast-forwards `main`, and after every change re-embeds the notes that changed
+so `brain search` and `brain chat` see them without a manual `brain index`.
+With `embeddings = "openrouter"` that needs the OpenRouter key (from `brain
+setup`); the `hashing` embedder works offline. `--no-embeddings` turns the
+step off; if the provider cannot be created the daemon logs one warning and
+keeps syncing without embeddings.
+
+`brain watch --install [--interval ms]` runs the daemon as a per-repo user
+service that starts at login and restarts on failure: a systemd user unit
+(`~/.config/systemd/user/brain-watch@<repo_id>.service`; run
+`loginctl enable-linger $USER` on a headless machine) on Linux, a LaunchAgent
+(`~/Library/LaunchAgents/io.brain.watch.<repo_id>.plist`, logs in
+`$BRAIN_HOME/repos/<repo_id>/runtime/watch.log`) on macOS. The unit pins the
+`BRAIN_HOME` in effect at install time and reads keys from its `config.toml`.
+`brain watch --status` reports running/stopped, `brain watch --uninstall`
+stops and removes it, and `brain doctor` shows whether one is installed.
 
 ## Develop
 
@@ -62,7 +81,9 @@ Environment: `BRAIN_MODEL_PROVIDER` (`anthropic` | `openrouter`; auto-picks
 `BRAIN_EFFORT`, `BRAIN_EMBEDDINGS` (`hashing` | `openrouter`; defaults to
 `openrouter` when the model provider is OpenRouter, `hashing` otherwise),
 `BRAIN_EMBEDDING_MODEL`, `BRAIN_EMBEDDING_DIMS`, `BRAIN_MODEL_MOCK=1` (canned
-model for smoke tests). Environment variables override `~/.brain/config.toml`
+model for smoke tests). `brain watch` uses the same embedding settings, so an
+`openrouter` embedder needs `OPENROUTER_API_KEY` (or the key in `config.toml`)
+in the daemon's environment; `hashing` needs nothing. Environment variables override `~/.brain/config.toml`
 (written by `brain setup`; `brain doctor --offline` shows the effective values).
 When developing from source you can also put them in a `.env` (gitignored)
 and run `bun --env-file=.env src/cli.ts …`.

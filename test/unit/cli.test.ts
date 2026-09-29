@@ -171,6 +171,24 @@ describe("brain CLI (Phase 11a)", () => {
     120_000,
   );
 
+  test("watch --install / --uninstall / --status outside a knowledge repo is a usage error (exit 2), no service manager touched", () => {
+    const outside = mkdtempSync(join(tmpdir(), "brain-cli-norepo-"));
+    try {
+      for (const flag of ["--install", "--uninstall", "--status"]) {
+        const r = run(["watch", flag], { cwd: outside });
+        expect(r.code).toBe(2);
+        expect(r.err).toContain("brain.toml");
+        expect(r.err).toContain("watch --install/--uninstall/--status");
+      }
+      const missing = run(["watch", "--install", "--repo", join(outside, "nope")], { cwd: outside });
+      expect(missing.code).toBe(2);
+      expect(missing.err).toContain("brain.toml");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+    expect(parseArgs(["watch", "--install", "--interval", "500", "--no-embeddings"]).flags).toEqual({ install: true, interval: "500", "no-embeddings": true });
+  });
+
   test("findRepoRoot walks up and returns null outside a repo", () => {
     expect(findRepoRoot(join(repo, "knowledge"))).toBe(repo);
     expect(findRepoRoot(home)).toBeNull();
@@ -296,6 +314,7 @@ describe("brain setup / doctor (first-run configuration)", () => {
       expect(d.out).toContain("watch");
       expect(d.out).toContain("unknown (no ");
       expect(d.out).toContain("watch.pid");
+      expect(d.out).toMatch(/watch.*not installed/); // service detection is offline (file existence) and this repo_id is fresh
       const missing = run(["doctor", "--offline", "--repo", join(repo, "nope")], { env: { OPENROUTER_API_KEY: KEY } });
       expect(missing.code).toBe(1);
       expect(missing.err).toContain("brain.toml");
