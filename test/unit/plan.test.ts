@@ -312,7 +312,9 @@ describe("planCandidate", () => {
     expect(r.dropped[0]!.reason).toContain("collides");
     expect(r.mutations.map((m) => m.type)).toEqual(["CREATE", "LINK"]);
     for (const m of r.mutations) expect((await env.coord.submit(m)).state).toBe("INTEGRATED");
-    expect(fileAt(env.repo.path, "main", "knowledge/cheap-undo.md")).toBe(created);
+    // The system assigns the CREATE's id (planner.assignNoteId); compare everything else.
+    const stripId = (s: string) => s.replace(/^id: .*$/m, "id: <assigned>");
+    expect(stripId(fileAt(env.repo.path, "main", "knowledge/cheap-undo.md")!)).toBe(stripId(created));
     expect(fileAt(env.repo.path, "main", safe.path)).toBe(linked);
   });
 

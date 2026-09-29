@@ -134,9 +134,12 @@ describe("provider factories", () => {
   test("createModelProvider honors BRAIN_MODEL and BRAIN_EFFORT; defaults otherwise", () => {
     const prevModel = process.env.BRAIN_MODEL;
     const prevEffort = process.env.BRAIN_EFFORT;
+    const prevKind = process.env.BRAIN_MODEL_PROVIDER;
     try {
       delete process.env.BRAIN_MODEL;
       delete process.env.BRAIN_EFFORT;
+      // bun auto-loads .env; an OPENROUTER_API_KEY there would flip auto-detection.
+      process.env.BRAIN_MODEL_PROVIDER = "anthropic";
       const d = createModelProvider() as ClaudeModelProvider;
       expect(d).toBeInstanceOf(ClaudeModelProvider);
       expect(d.model).toBe("claude-opus-5-5");
@@ -151,6 +154,8 @@ describe("provider factories", () => {
     } finally {
       if (prevModel === undefined) delete process.env.BRAIN_MODEL;
       else process.env.BRAIN_MODEL = prevModel;
+      if (prevKind === undefined) delete process.env.BRAIN_MODEL_PROVIDER;
+      else process.env.BRAIN_MODEL_PROVIDER = prevKind;
       if (prevEffort === undefined) delete process.env.BRAIN_EFFORT;
       else process.env.BRAIN_EFFORT = prevEffort;
     }

@@ -20,7 +20,7 @@ import type {
   TargetPrecondition,
   ValidationIssue,
 } from "../core/types";
-import { mutationId as newMutationId, proposalId as newProposalId } from "../core/ids";
+import { mutationId as newMutationId, noteId as newNoteId, proposalId as newProposalId } from "../core/ids";
 import { isNotePath, slugFromPath, slugKey } from "../core/slug";
 import { NoteParseError, parseNote } from "../markdown/parse";
 import type { PlannerInput, PlannerNote } from "./context";
@@ -193,6 +193,24 @@ function todayIso(today: string): string {
  * input are dropped with a reason. No validation beyond binding happens
  * here; see `validatePlannedMutation`.
  */
+/** Files always end with exactly one trailing newline. */
+export function ensureTrailingNewline(content: string): string {
+  return content.replace(/\s*$/, "\n");
+}
+
+/**
+ * The system, not the model, assigns note identity (design §9). Replace the
+ * frontmatter `id:` line of a CREATE with a fresh ULID, inserting one when
+ * the model omitted it.
+ */
+export function assignNoteId(content: string, id: string = newNoteId()): string {
+  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return content;
+  const block = fm[1]!;
+  const replaced = /^id:.*$/m.test(block) ? block.replace(/^id:.*$/m, `id: ${id}`) : `id: ${id}\n${block}`;
+  return content.slice(0, fm.index! + 4) + replaced + content.slice(fm.index! + 4 + block.length);
+}
+
 export function materialize(input: PlannerInput, ops: PlannedOp[]): MaterializedPlan {
   const mutations: Mutation[] = [];
   const proposals: Proposal[] = [];
@@ -230,7 +248,7 @@ export function materialize(input: PlannerInput, ops: PlannedOp[]): Materialized
         type: "CREATE",
         summary: `create ${titleOf(op.content, op.path)}`,
         targets,
-        writes: [{ path: op.path, content: op.content }],
+        writes: [{ path: op.path, content: ensureTrailingNewline(assignNoteId(op.content)) }],
         dependsOn: [],
         evidence,
       };
@@ -250,7 +268,7 @@ export function materialize(input: PlannerInput, ops: PlannedOp[]): Materialized
         type: op.op,
         summary: `${op.op.toLowerCase().replace(/_/g, " ")} ${note.title || note.slug}`,
         targets: [{ kind: "present", noteId: note.noteId, path: note.path, blobHash: note.blobHash }],
-        writes: [{ path: note.path, content: op.content }],
+        writes: [{ path: note.path, content: ensureTrailingNewline(op.content) }],
         dependsOn: [],
         evidence,
       };

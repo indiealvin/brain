@@ -39,7 +39,7 @@ Rules:
 A note is a Markdown file with YAML frontmatter, an H1 title and "## " sections:
 
 ---
-id: <ULID, unchanged for existing notes; a fresh 26-char Crockford base32 ULID for CREATE>
+id: <unchanged for existing notes; for CREATE write the placeholder NEW and the system assigns the id>
 created: <YYYY-MM-DD>
 type: idea | decision | hypothesis | question | observation | reference
 status: active | tentative | superseded | resolved | archived
