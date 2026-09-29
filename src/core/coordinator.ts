@@ -214,6 +214,8 @@ class Coordinator implements RepoCoordinator {
       for (const row of this.queue.listByState(["BLOCKED"])) {
         this.queue.setState(row.mutationId, "REPLAN", { lastError: row.lastError ?? "BLOCKED: dependency invalidated" });
       }
+      // §17 step 5: index projects agent HEAD.
+      await this.reconcileIndexUnlocked();
     });
   }
 

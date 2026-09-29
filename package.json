@@ -3,9 +3,15 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "bin": {
+    "brain": "src/cli.ts"
+  },
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
