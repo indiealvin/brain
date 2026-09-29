@@ -2,3 +2,4 @@ node_modules/
 .brain/
 *.sqlite
 .DS_Store
+.env

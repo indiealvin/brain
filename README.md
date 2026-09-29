@@ -37,8 +37,24 @@ bun /path/to/brain/src/cli.ts watch           # daemon: human sync + integrate l
 agent worktree. Deleting it never loses knowledge; `brain index --rebuild`
 recreates the index from Git.
 
-Environment: `BRAIN_MODEL` (default `claude-opus-5-5`), `BRAIN_EFFORT`,
-`BRAIN_MODEL_MOCK=1` (canned model for smoke tests).
+Environment: `BRAIN_MODEL_PROVIDER` (`anthropic` | `openrouter`; auto-picks
+`openrouter` when only `OPENROUTER_API_KEY` is set), `BRAIN_MODEL` (default
+`claude-opus-5-5` or `anthropic/claude-sonnet-4.5` on OpenRouter),
+`BRAIN_EFFORT`, `BRAIN_EMBEDDINGS` (`hashing` | `openrouter`),
+`BRAIN_EMBEDDING_MODEL`, `BRAIN_EMBEDDING_DIMS`, `BRAIN_MODEL_MOCK=1` (canned
+model for smoke tests). Put keys in a `.env` (gitignored) and run
+`bun --env-file=.env src/cli.ts …`.
+
+Using OpenRouter only:
+
+```
+# .env
+OPENROUTER_API_KEY=sk-or-...
+BRAIN_MODEL=anthropic/claude-sonnet-4.5
+BRAIN_EMBEDDINGS=openrouter
+BRAIN_EMBEDDING_MODEL=openai/text-embedding-3-small
+BRAIN_EMBEDDING_DIMS=1536
+```
 
 ## Layout
 
