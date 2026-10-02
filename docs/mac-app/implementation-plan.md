@@ -108,12 +108,13 @@ and checked that its changes stayed in scope.
 | T1.5 | `42adf9c` | 552 |
 | T1.6 | `31d9cc7` | 571 |
 | T1.7 | `005f297` | 588 |
+| T1.8 | `12d1284` | 619 |
 
 **M0 is complete and released as v0.2.0** (2026-10-02, tag on `1839733`,
 the first run of the version-driven `release.yml`). Every design §5.2 test
 passes on Linux and macOS (CI 37047160031).
 
-**M1:** T1.8 is next, and the last M1 task.
+**M1 is complete.** The core work for the first Mac version is done; what remains is Mac-side (M3, `mac-handoff.md`).
 
 **Deferred by the owner:** CR-5, M2, T2.4 and T3.9's capture panel.
 
