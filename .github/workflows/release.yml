@@ -5,6 +5,8 @@ name: release
 #   merge that does not bump the version releases nothing.
 # - A pushed tag v* still releases, but only if it equals v<version>, so a
 #   binary never reports a version other than its tag.
+# The release notes are the CHANGELOG.md section for the version
+# (scripts/changelog-section.sh); a version without one is not released.
 # The tag and the GitHub release are created by the release job through the
 # API (softprops/action-gh-release). A tag pushed with GITHUB_TOKEN would not
 # trigger another workflow, which is why tagging and building happen in this
@@ -49,6 +51,13 @@ jobs:
           else
             echo "will release $tag from ${GITHUB_SHA}"
             echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: changelog section
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          if ! scripts/changelog-section.sh "${{ steps.decide.outputs.tag }}" > /dev/null; then
+            echo "::error::CHANGELOG.md has no section for ${{ steps.decide.outputs.tag }}"
+            exit 1
           fi
 
   build:
@@ -124,10 +133,13 @@ jobs:
           assets/brain --version
           assets/brain init /tmp/smoke-notes
           cd /tmp/smoke-notes && BRAIN_MODEL_MOCK=1 "$GITHUB_WORKSPACE/assets/brain" chat --once hello --wait
+      - name: release notes
+        run: scripts/changelog-section.sh "${{ needs.check.outputs.tag }}" > release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check.outputs.tag }}
           target_commitish: ${{ github.sha }}
+          body_path: release-notes.md
           files: |
             assets/*.tar.gz
             assets/*.sha256
