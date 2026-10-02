@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { openCoordinator } from "../core/coordinator";
+import { openCoordinator, type ProposalsChangedListener } from "../core/coordinator";
 import type { ExecutionResult, IntegrationResult, MutationState, ReconcileResult, RepoCoordinator, SyncResult } from "../core/types";
 import { fastForwardAgentToMain, pendingIntegration, type PendingIntegration } from "../git/worktree";
 import { indexedCommitOf, openIndex } from "../index/schema";
@@ -34,11 +34,16 @@ export function findRepoRoot(start: string): string | null {
 }
 
 /**
- * `drainQueued` is implemented by the concrete coordinator (execute every
- * QUEUED mutation, then integrate) but is not part of the read-only
- * `RepoCoordinator` seam, so the open sequence checks for it at runtime.
+ * `drainQueued` (execute every QUEUED mutation, then integrate) and
+ * `onProposalsChanged` (this process's proposal writes, for the RPC
+ * server's `proposals.changed`) are implemented by the concrete coordinator
+ * but are not part of the read-only `RepoCoordinator` seam, so the open
+ * sequence checks for them at runtime.
  */
-export type Coord = RepoCoordinator & { drainQueued(): Promise<ExecutionResult[]> };
+export type Coord = RepoCoordinator & {
+  drainQueued(): Promise<ExecutionResult[]>;
+  onProposalsChanged(listener: ProposalsChangedListener): () => void;
+};
 
 export interface OpenedRepo {
   coord: Coord;
@@ -62,9 +67,11 @@ export interface OpenedRepo {
  */
 export async function openRepo(repoDir: string): Promise<OpenedRepo> {
   const opened = await openCoordinator(repoDir);
-  if (typeof (opened as Partial<Coord>).drainQueued !== "function") {
-    await opened.close();
-    throw new ServiceError("INTERNAL", "coordinator does not implement drainQueued()");
+  for (const method of ["drainQueued", "onProposalsChanged"] as const) {
+    if (typeof (opened as Partial<Coord>)[method] !== "function") {
+      await opened.close();
+      throw new ServiceError("INTERNAL", `coordinator does not implement ${method}()`);
+    }
   }
   const coord = opened as Coord;
   try {
