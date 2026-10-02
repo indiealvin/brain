@@ -9,6 +9,8 @@
  *   (a reject whose own refresh marked its proposal STALE).
  * - Nothing for a section that changed nothing: a list with nothing to mark,
  *   a lost accept (`REPLAN` / `"STALE"`), a lost reject, an unknown id.
+ * - A get with its review diff (`proposalDetail`, T1.8) reports like a list:
+ *   its refresh is one locked section, the diff computed in that section.
  * - Never for another coordinator's writes (another process, in production).
  * - A listener that throws fails nothing.
  *
@@ -168,6 +170,48 @@ describe("onProposalsChanged (T1.6)", () => {
     } finally {
       await other.close();
     }
+  });
+
+  test("a get (proposalDetail) reports the proposals its refresh marked STALE, once, and nothing when it marks none or the id is unknown", async () => {
+    env = await setupEnv();
+    const coord = env.coord as Coord;
+    const a = await archiveOf(env, "detailed");
+    const b = await archiveOf(env, "also-outdated");
+    await coord.submitProposal(a.p);
+    await coord.submitProposal(b.p);
+    const reports = watch(coord);
+    const fresh = await coord.proposalDetail(a.p.proposalId);
+    expect(fresh.proposal).toEqual(a.p); // the whole Proposal, writes included
+    expect(fresh.diff).toEqual([{ path: a.path, change: "modified", unified: expect.stringContaining("\n-status: active\n+status: archived\n"), additions: 1, deletions: 1 }]);
+    expect(reports).toEqual([]);
+
+    await editTarget(env, a.path);
+    await editTarget(env, b.path);
+    expect(reports).toEqual([]);
+    // One section: the refresh marks both, then a's diff is computed against its snapshot, still in history.
+    const stale = await coord.proposalDetail(a.p.proposalId);
+    expect(stale.proposal.status).toBe("STALE");
+    expect(stale.diff).toEqual(fresh.diff);
+    expect(reports.map((ids) => [...ids].sort())).toEqual([[a.p.proposalId, b.p.proposalId].sort()]);
+    await coord.proposalDetail(b.p.proposalId);
+    await expect(coord.proposalDetail("prop_nope")).rejects.toBeInstanceOf(UnknownProposalError);
+    expect(reports).toHaveLength(1);
+  });
+
+  test("a get runs the REPLAN → STALE check of accepted proposals too", async () => {
+    env = await setupEnv();
+    const coord = env.coord as Coord;
+    const { p, path, content } = await archiveOf(env, "accepted-then-replanned");
+    await coord.submitProposal(p);
+    await Bun.write(join(env.repo.path, path), content.replace("accepted-then-replanned claim", "the human's edit")); // not quiescent yet
+    expect((await coord.acceptProposal(p.proposalId)).state).toBe("COMMITTED"); // integration refused: dirty target
+    env.clock.advance(60_000);
+    await coord.integrate(); // Human Sync commits the edit; the rebuild sends the mutation to REPLAN
+    const reports = watch(coord);
+    const detail = await coord.proposalDetail(p.proposalId);
+    expect(detail.proposal.status).toBe("STALE");
+    expect(detail.diff.map((d) => [d.path, d.change])).toEqual([[path, "modified"]]);
+    expect(reports).toEqual([[p.proposalId]]);
   });
 
   test("unsubscribing stops the reports", async () => {

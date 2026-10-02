@@ -237,7 +237,7 @@ knowledge run still happens.
 |---|---|---|---|
 | `repo.status` | `{}` | `RepoStatus` | `repoStatus` data, `src/commands/repo.ts:153` |
 | `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:293`. Same method as before `initialize`; `repoPath` defaults to the initialized repo |
-| `repo.pendingIntegration` | `{}` | `{mainHead, agentHead, paths: string[]}` | new, CR-4: paths that differ between `main` and agent HEAD (`design.md` §8) |
+| `repo.pendingIntegration` | `{}` | `{mainHead, agentHead, paths: string[]}` | new, CR-4: paths that differ between `main` and agent HEAD (`design.md` §8); `pendingIntegration`, `src/git/worktree.ts`. Takes no lock |
 | `engine.status` | `{}` | `EngineInfo & {lastTick?: EngineTick}` | RPC |
 | `engine.tick` | `{}` | `EngineTick` | `watchTick(…, {force: true})`, `src/cli/watch.ts:96`. Allowed whatever the loop owner (safe under CR-1). It runs after this server's tick in flight, never alongside it |
 
@@ -304,7 +304,7 @@ there. The client refetches on the next `repo.changed`.
 | Method | Params | Result | Source |
 |---|---|---|---|
 | `proposals.list` | `{status?: ProposalStatus}` | `ProposalSummary[]` | `listProposals` (refreshes staleness), `src/core/coordinator.ts:416` |
-| `proposals.get` | `{proposalId}` | `{proposal: Proposal, diff: FileDiff[]}` | Refreshes staleness, then computes the diff (CR-4), both in one CR-1 lock section. This makes the reachability argument below hold |
+| `proposals.get` | `{proposalId}` | `{proposal: Proposal, diff: FileDiff[]}` | Refreshes staleness, then computes the diff (CR-4), both in one CR-1 lock section (`proposalDetail`, `src/core/coordinator.ts`). This makes the reachability argument below hold. `proposal` is the whole `Proposal`, with `writes`; `diff` has one entry per write, in `writes` order |
 | `proposals.accept` | `{proposalId}` | `ExecutionResult` | `acceptProposal`, `src/core/coordinator.ts:438` |
 | `proposals.reject` | `{proposalId, note?}` | `{proposalId, status: "REJECTED"}` | `rejectProposal`, `src/core/coordinator.ts:486`, with the compare-and-set of CR-1 (`design.md` §5.2). The PENDING check that was in `src/cli.ts:440` at `74d1445` moved into core (T0.5) |
 | `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:165`). The service layer filters, reverses to newest first, and applies the limit. An empty `states` matches nothing |
@@ -333,12 +333,29 @@ decision. The loser gets `PROPOSAL_NOT_PENDING` (reject) or `REPLAN` /
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `history.list` | `{path?, limit?=50, before?: sha}` | `HistoryEntry[]` | new, CR-4: `git log main` + `parseTrailers`, `src/git/git.ts:244` |
-| `history.diff` | `{sha, path?}` | `FileDiff[]` | new, CR-4 |
+| `history.list` | `{path?, limit?=50, before?: sha}` | `HistoryEntry[]` | new, CR-4: `main`'s first-parent history + `parseTrailers`, `src/git/git.ts:256`; `historyList`, `src/commands/history.ts` |
+| `history.diff` | `{sha, path?}` | `FileDiff[]` | new, CR-4: `historyDiff`, `src/commands/history.ts` |
 
 `history.list` reads `main` (what the user owns). Pending agent commits
 appear through `mutations.list` with state `COMMITTED`. There is no revert
 method in v1 (`design.md` §14.1).
+
+`history.list` returns the newest commits first and follows first parents,
+so a merge made by hand is one entry. `path` keeps the commits that
+changed that file, or a file under that directory, against their first
+parent. `path` is relative to the repository root and literal (no pathspec
+magic). `paths` still lists every file the commit changed. `before` keeps
+only the commits older than that one, so a client pages with the last
+`sha` of the previous page, and it must name a commit on `main`.
+`history.diff` accepts any commit of the repository, also an agent commit
+that is not integrated yet (`QueueRow.commitSha`). It compares the commit
+with its first parent, or a root commit with the empty tree, and `path`
+limits it to one file or directory. A `sha` or `before` is a hex object
+name. Both methods read Git only and take no lock.
+
+Errors: `INVALID_PARAMS` for a `sha` or `before` that names no commit,
+`data: {sha}` or `{before}`, also for a `before` that is not on `main`; and
+for a `path` that is absolute or contains `..`.
 
 ## 5. Notifications
 
@@ -442,7 +459,7 @@ Rules:
 | `MutationState` | `QUEUED RUNNING COMMITTED INTEGRATED NOOP REPLAN BLOCKED FAILED_INVALID_EXECUTION FAILED` | 144 |
 | `ProposalStatus` | `PENDING ACCEPTED REJECTED STALE` | 192 |
 | `TurnRole` | `user assistant` | 219 |
-| `CommitTrailers.actor` | `agent human-sync human` (a missing trailer parses as `human`, `src/git/git.ts:262–264`) | 184 |
+| `CommitTrailers.actor` | `agent human-sync human` (a missing trailer parses as `human`, `src/git/git.ts:275–276`) | 184 |
 | `IntegrationResult.status` | `integrated refused-dirty nothing-to-integrate rebuilt-and-integrated` | 305 |
 | `CheckStatus` | `ok fail warn skip info` (`src/config/doctor.ts:51`) | — |
 
@@ -545,21 +562,31 @@ interface FileDiff {
 
 // One commit on main. Trailers per docs/spec.md §54, parsed by parseTrailers.
 interface HistoryEntry {
-  sha: string; committedAt: string; subject: string;
-  actor: "agent" | "human-sync" | "human";
+  sha: string; committedAt: string; subject: string;  // committedAt: committer date, UTC, as toISOString()
+  actor: "agent" | "human-sync" | "human";            // no Actor trailer (a user's own git revert): "human"
   mutationId?: string; mutationType?: MutationType; replans?: string;
-  paths: string[];
+  paths: string[];                                     // changed against the first parent
 }
 ```
 
 For proposals, `FileDiff` compares the snapshot blob (`targets[].blobHash`)
 with `writes[].content`. A `null` content produces `change: "deleted"`.
+A write whose path has no target is `"added"`. A write whose content
+equals its snapshot is still listed, as `"modified"` with `unified: ""`.
 For history it compares `sha^` with `sha`.
+
+`unified` has one format for proposals and commits: `--- a/<path>` and
+`+++ b/<path>` (`/dev/null` for an absent side), then the hunks, each
+headed by a bare `@@ -l,s +l,s @@` line. There is no `diff --git` or
+`index` line. `additions` and `deletions` count the hunks' `+` and `-`
+lines. Identical sides and an empty file added or deleted give
+`unified: ""`. A binary file gives the one line
+`Binary files a/<path> and b/<path> differ`. Both have zero counts.
 
 The snapshot blob of an old, non-PENDING proposal can become unreachable,
 for example after a rebuild followed by `git gc`. In that case the
-`FileDiff` carries `unified: null` and `beforeUnavailable: true`, and the
-client shows the after content only. So the full shape is
+`FileDiff` carries `unified: null`, zero counts and `beforeUnavailable: true`,
+and the client shows the after content only. So the full shape is
 `unified: string | null` plus an optional `beforeUnavailable?: true`.
 PENDING proposals never hit this case, because a PENDING proposal's
 snapshot is by definition still the blob at agent HEAD (I-19).

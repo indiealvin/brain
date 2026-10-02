@@ -4,8 +4,10 @@
  * messages as subsets, so they cannot show that a field is absent, and they
  * have no step that holds the worktree lock.
  *
- * - Reads never wait for the worktree lock. Only `proposals.list` takes it,
- *   because its staleness refresh writes STALE marks.
+ * - Reads never wait for the worktree lock (T1.8's `repo.pendingIntegration`,
+ *   `history.list` and `history.diff` included). Only `proposals.list` and
+ *   `proposals.get` take it, because their staleness refresh writes STALE
+ *   marks.
  * - `proposals.list` sends `ProposalSummary`: the `Proposal` without `writes`.
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -118,7 +120,7 @@ async function holdWorktreeLock(runtimeDir: string): Promise<Subprocess> {
 
 describe("read methods and the worktree lock (protocol §5)", () => {
   test(
-    "every read answers while another process holds the worktree lock; proposals.list waits for it",
+    "every read answers while another process holds the worktree lock; proposals.list and proposals.get wait for it",
     async () => {
       const { h, noteId, content } = await initializedServer();
       const coord = h.server.session.coord;
@@ -128,6 +130,7 @@ describe("read methods and the worktree lock (protocol §5)", () => {
       const holder = await holdWorktreeLock(coord.paths.runtimeDir);
 
       h.send("p", "proposals.list");
+      h.send("g", "proposals.get", { proposalId: "prop_01JA00000000000000000000P1" });
       const reads: [string, string, Msg][] = [
         ["r1", "repo.status", {}],
         ["r2", "engine.status", {}],
@@ -138,20 +141,32 @@ describe("read methods and the worktree lock (protocol §5)", () => {
         ["r7", "notes.get", { noteId }],
         ["r8", "notes.search", { query: "worktree lock" }],
         ["r9", "mutations.list", {}],
+        ["r10", "repo.pendingIntegration", {}],
+        ["r11", "history.list", {}],
       ];
       const results = await Promise.all(reads.map(([id, method, params]) => h.request(id, method, params)));
       for (const [i, r] of results.entries()) expect({ method: reads[i]![1], type: r.type }).toEqual({ method: reads[i]![1], type: "result" });
       expect(results[0]!.data.pendingProposals).toBe(1);
       expect(results[6]!.data.note.noteId).toBe(noteId);
+      expect(results[9]!.data).toEqual({ mainHead: results[0]!.data.mainHead, agentHead: results[0]!.data.agentHead, paths: [] });
+      const seed = results[10]!.data[0];
+      expect(seed).toMatchObject({ subject: "user: seed note", actor: "human", paths: [NOTE] });
+      const diffed = await h.request("r12", "history.diff", { sha: seed.sha });
+      expect(diffed.data.map((d: Msg) => [d.path, d.change])).toEqual([[NOTE, "added"]]);
 
-      // Control: the refreshing read is still waiting for the holder.
+      // Control: the refreshing reads are still waiting for the holder.
       await sleep(300);
       expect(h.terminal("p")).toBeUndefined();
+      expect(h.terminal("g")).toBeUndefined();
       holder.kill("SIGKILL");
       await holder.exited;
       const listed = await h.request("p2", "proposals.list");
       expect(listed.data.map((p: Msg) => p.status)).toEqual(["PENDING"]);
       expect(h.terminal("p")?.type).toBe("result");
+      const got = await h.request("g2", "proposals.get", { proposalId: "prop_01JA00000000000000000000P1" });
+      expect(got.data.proposal.status).toBe("PENDING");
+      expect(got.data.diff.map((d: Msg) => [d.path, d.change, d.additions, d.deletions])).toEqual([[NOTE, "modified", 1, 1]]);
+      expect(h.terminal("g")).toEqual({ ...got, id: "g" });
     },
     60_000,
   );

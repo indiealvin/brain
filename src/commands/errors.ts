@@ -47,6 +47,23 @@ export class UnknownNoteError extends ServiceError {
 }
 
 /**
+ * A commit parameter of the history reads (`history.list`'s `before`,
+ * `history.diff`'s `sha`) that names no commit of the repository, or, for
+ * `before`, a commit that is not on `main`. A bad parameter
+ * (`INVALID_PARAMS`), carrying the parameter's name and value.
+ */
+export class UnknownCommitError extends ServiceError {
+  readonly field: string;
+  readonly sha: string;
+  constructor(field: string, sha: string, message = `${field}: ${sha} is not a commit of this repository`) {
+    super("INVALID_PARAMS", message);
+    this.name = "UnknownCommitError";
+    this.field = field;
+    this.sha = sha;
+  }
+}
+
+/**
  * A turn id that is not in its session: `conversation.get`'s `beforeTurnId`.
  * Turns are never removed, so a client paging with the ids it was given never
  * sees this. It is a bad parameter (`INVALID_PARAMS`), not a missing record.

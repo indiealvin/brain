@@ -124,11 +124,15 @@ export interface InitializeResult {
 /**
  * The service layer's result types, sent unchanged: `RepoStatus` (cmdStatus
  * data), `SearchHit`, `NoteDetail`, `ProposalSummary` (a `Proposal` without
- * `writes`), and the pending-integration paths (CR-4).
+ * `writes`), and CR-4's: the pending-integration paths, `ProposalDetail`
+ * (`proposals.get`), `FileDiff` and `HistoryEntry`.
  */
 export type { RepoStatus, PendingIntegration } from "../commands/repo";
 export type { SearchHit, NoteDetail } from "../commands/notes";
 export type { ProposalSummary } from "../commands/proposals";
+export type { ProposalDetail } from "../core/coordinator";
+export type { FileDiff } from "../git/diff";
+export type { HistoryEntry } from "../commands/history";
 
 /**
  * One turn: `ConversationTurn` (src/core/types.ts) plus the timestamp the

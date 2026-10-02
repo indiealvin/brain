@@ -12,7 +12,7 @@ import type { Subprocess } from "bun";
 import { Database } from "bun:sqlite";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openCoordinator } from "../../src/core/coordinator";
+import { openCoordinator, type ProposalDetail } from "../../src/core/coordinator";
 import { AGENT_BRANCH } from "../../src/core/types";
 import type { ExecutionResult, Proposal, RepoCoordinator } from "../../src/core/types";
 import { isLockHeld, LockReentryError, withRepoWorktreeLock, WORKTREE_LOCK } from "../../src/sync/lock";
@@ -39,7 +39,7 @@ const LOCK_MODULE = join(import.meta.dir, "..", "..", "src", "sync", "lock.ts");
 const PENDING_MS = 300;
 const SPAWN_TIMEOUT_MS = 60_000;
 
-type Coord = RepoCoordinator & { drainQueued(): Promise<ExecutionResult[]> };
+type Coord = RepoCoordinator & { drainQueued(): Promise<ExecutionResult[]>; proposalDetail(proposalId: string): Promise<ProposalDetail> };
 
 let env: Env | null = null;
 let children: Subprocess[] = [];
@@ -245,6 +245,16 @@ const ROWS: Row[] = [
     check: (r: Proposal[], { p }) => {
       // the staleness refresh (a write) ran under the lock
       expect(r.map((x) => [x.proposalId, x.status])).toEqual([[p.proposalId, "STALE"]]);
+    },
+  },
+  {
+    method: "proposalDetail",
+    setup: async (e) => ({ p: await archiveProposal(e, "detailed", { staleBlob: true }) }),
+    call: (c, { p }) => c.proposalDetail(p.proposalId),
+    check: (r: ProposalDetail, { p }) => {
+      // the staleness refresh (a write) and the diff ran under the lock
+      expect(r.proposal.status).toBe("STALE");
+      expect(r.diff).toEqual([{ path: p.writes[0].path, change: "modified", unified: null, additions: 0, deletions: 0, beforeUnavailable: true }]);
     },
   },
   {
