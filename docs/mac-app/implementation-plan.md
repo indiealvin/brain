@@ -123,9 +123,11 @@ Depends: none. Gate: none.
 - Add a `macos-latest` job to `.github/workflows/ci.yml`. Today there is
   only `ubuntu-latest` (`ci.yml:10`).
 - Port the lock spike into `test/unit/sqliteLockPlatform.test.ts`. The
-  source is `scripts/spikes/sqlite-lock-spike.ts`. Once the port exists,
+  source was `scripts/spikes/sqlite-lock-spike.ts`. Once the port exists,
   the spike file is deleted, and design §5.2's reference to it is updated
-  to point at the test. It exercises `bun:sqlite` directly, not
+  to point at the test. (Done: the spike is now
+  `test/unit/sqliteLockPlatform.test.ts`, and "spike A2"-style citations
+  below name its checks.) It exercises `bun:sqlite` directly, not
   the new primitive, and pins the platform assumptions that design §5.2
   relies on: A1–A7, A8a, B1–B2, C0–C3b, D1–D2, E1–E4, F1, G0–G1 and
   H1–H4. A8 and C3c are informational. Its temp dirs are created with `mkdtemp` under the test temp root,

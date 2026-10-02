@@ -236,8 +236,12 @@ and rejected in §15.
     acquisitions. It also verified the async wait shape required above:
     the event loop stays responsive while waiting, and a deadline is
     honored. And it verified the `data_version` behavior relied on in §5.3
-    item 4. The spike is `scripts/spikes/sqlite-lock-spike.ts`. **macOS has not been verified yet.** Task T0.1 of the
-    implementation plan reruns the spike there.
+    item 4. The spike is now the unit test
+    `test/unit/sqliteLockPlatform.test.ts` (task T0.1), with the same
+    check names (A1–H4). It runs in the main suite on the Linux and the
+    macOS CI jobs and logs which SQLite library `bun:sqlite` uses. **macOS
+    has not been verified yet**: the first green run of the `test-macos`
+    CI job is that verification.
   - `flock(2)` through FFI is an acceptable alternative, with one
     condition: the lock file must be opened close-on-exec. `flock` locks
     follow inherited descriptors, so a spawned `git` process could
