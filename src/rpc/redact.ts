@@ -37,4 +37,16 @@ export class Redactor {
     for (const s of this.ordered) if (out.includes(s)) out = out.split(s).join(REDACTED);
     return out;
   }
+
+  /** `redact` every string (object keys untouched) of a JSON value, e.g. a notification's data. A copy; `value` is not changed. */
+  redactDeep<T>(value: T): T {
+    if (this.ordered.length === 0) return value;
+    const walk = (v: unknown): unknown => {
+      if (typeof v === "string") return this.redact(v);
+      if (Array.isArray(v)) return v.map(walk);
+      if (typeof v === "object" && v !== null) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+      return v;
+    };
+    return walk(value) as T;
+  }
 }

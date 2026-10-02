@@ -1,0 +1,26 @@
+{
+  "chat": [{ "response": "So cheap undo turns approval into an after-the-fact review, and the agent can act first." }],
+  "extractor": [
+    {
+      "response": {
+        "candidates": [
+          { "kind": "idea", "claim": "Reversible agent actions let an agent act with less pre-approval", "groundedSources": ["{{lastUser}}"], "inferences": [] }
+        ]
+      }
+    }
+  ],
+  "planner": [
+    {
+      "response": {
+        "operations": [
+          {
+            "op": "CREATE",
+            "path": "knowledge/undo-replaces-approval.md",
+            "content": "---\nid: NEW\ncreated: 2026-10-02\ntype: idea\nstatus: active\n---\n# Undo replaces approval\n\n## Claim\nCheap undo lets an agent act first and be reviewed afterwards.\nGrounded-in: {{lastUser}}\n",
+            "reasoning": "a new concept"
+          }
+        ]
+      }
+    }
+  ]
+}

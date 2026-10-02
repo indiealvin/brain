@@ -41,6 +41,9 @@ export interface ReplayOptions {
   trailingMs?: number;
 }
 
+/** The header's `modelScript` is copied to `<tmp>/<MODEL_SCRIPT_FILE>`: relative `hold` and `repeat` files, and the call log, live in `<tmp>`. */
+export const MODEL_SCRIPT_FILE = "model-script.json";
+
 /** One run's temp dirs, server and step state; shared by replay and the recorder. */
 export interface Run {
   readonly tmp: string;
@@ -66,7 +69,7 @@ export function createRun(header: TranscriptHeader, baseDir: string): Run {
   if (header.tmp !== undefined) subs.alias(header.tmp, tmp);
   const env: Record<string, string> = {};
   if (header.modelScript !== undefined) {
-    const script = join(tmp, "model-script.json");
+    const script = join(tmp, MODEL_SCRIPT_FILE);
     copyFileSync(resolve(baseDir, header.modelScript), script);
     env["BRAIN_MODEL_SCRIPT"] = script;
   }

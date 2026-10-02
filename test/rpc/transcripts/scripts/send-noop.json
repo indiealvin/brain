@@ -1,0 +1,26 @@
+{
+  "chat": [{ "response": "Then the note you already have says it." }],
+  "extractor": [
+    {
+      "response": {
+        "candidates": [
+          { "kind": "idea", "claim": "Reversible agent actions can be undone cheaply", "groundedSources": ["{{lastUser}}"], "inferences": [] }
+        ]
+      }
+    }
+  ],
+  "planner": [
+    {
+      "response": {
+        "operations": [
+          {
+            "op": "ENRICH",
+            "noteId": "01JA0000000000000000000001",
+            "content": "---\nid: 01JA0000000000000000000001\ncreated: 2026-09-01\ntype: idea\nstatus: active\n---\n# Reversible agent actions\n\n## Claim\nReversible agent actions can be undone cheaply.\nGrounded-in: conversation://old/1\n",
+            "reasoning": "the note already says this"
+          }
+        ]
+      }
+    }
+  ]
+}

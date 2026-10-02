@@ -1,0 +1,7 @@
+{
+  "chat": [{ "response": "Reply in the first session." }, { "response": "Reply in the second session." }],
+  "extractor": [
+    { "response": { "candidates": [] }, "hold": "release-first-run" },
+    { "response": { "candidates": [] } }
+  ]
+}

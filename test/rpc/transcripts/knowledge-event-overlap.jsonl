@@ -1,0 +1,21 @@
+{"asserts":{"notifications":["knowledge.event"]},"tmp":"/tmp/brain-transcript","modelScript":"scripts/knowledge-overlap.json"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z2WSVC98ZAYNA5C2RAG4C6","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"ef80df4a1c6f40398ea3302a79ddfb933bce5c6e"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z2WSVC98ZAYNA5C2RAG4C6","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z2WSVC98ZAYNA5C2RAG4C6","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-10-02T08:00:00.000Z","turns":[]}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S2","createdAt":"2026-10-01T08:00:00.000Z","turns":[{"role":"user","text":"An earlier thought.","at":"2026-10-01T08:00:05.000Z"},{"role":"assistant","text":"An earlier reply.","at":"2026-10-01T08:00:09.000Z"}]}}
+{"dir":"c2s","msg":{"id":"a","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"A thought for the first session."}}}
+{"dir":"s2c","msg":{"id":"a","type":"reply.delta","data":{"text":"Reply in the first session."}}}
+{"dir":"s2c","msg":{"id":"a","type":"result","data":{"turn":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"A thought for the first session.","at":"2026-10-02T19:54:10.932Z"},"assistantTurn":{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"Reply in the first session.","at":"2026-10-02T19:54:10.935Z"},"contextNotes":[]}},"match":{"/data/turn/at":"<iso>","/data/assistantTurn/at":"<iso>"}}
+{"dir":"test","step":{"op":"modelScript.awaitCall","role":"extractor"}}
+{"dir":"c2s","msg":{"id":"b","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S2","text":"A thought for the second session."}}}
+{"dir":"s2c","msg":{"id":"b","type":"reply.delta","data":{"text":"Reply in the second session."}}}
+{"dir":"s2c","msg":{"id":"b","type":"result","data":{"turn":{"sessionId":"01JA00000000000000000000S2","turnId":"000003","role":"user","text":"A thought for the second session.","at":"2026-10-02T19:54:11.762Z"},"assistantTurn":{"sessionId":"01JA00000000000000000000S2","turnId":"000004","role":"assistant","text":"Reply in the second session.","at":"2026-10-02T19:54:11.762Z"},"contextNotes":[]}},"match":{"/data/turn/at":"<iso>","/data/assistantTurn/at":"<iso>"}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S2","turnId":"000003","event":{"type":"extracted","accepted":0,"rejected":0}}}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S2","turnId":"000003","event":{"type":"done","update":{"candidates":{"accepted":0,"rejected":0},"mutations":[],"proposals":[],"dropped":[],"noop":true,"errors":[]}},"summary":"Knowledge unchanged"}}}
+{"dir":"test","step":{"op":"modelScript.release","file":"release-first-run"}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"extracted","accepted":0,"rejected":0}}}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"done","update":{"candidates":{"accepted":0,"rejected":0},"mutations":[],"proposals":[],"dropped":[],"noop":true,"errors":[]}},"summary":"Knowledge unchanged"}}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

@@ -5,6 +5,8 @@
  */
 import type { WatchTickResult } from "../cli/watch";
 import type { TurnRole } from "../core/types";
+import type { ContextNote } from "../pipeline/chat";
+import type { KnowledgeEvent } from "../pipeline/knowledge";
 import type { RpcErrorCode } from "./errors";
 
 /** The one protocol version this server speaks (protocol §8). */
@@ -146,6 +148,40 @@ export interface TurnPageDTO {
   turns: TurnDTO[];
   /** Older turns exist before `turns[0]`. */
   hasMore: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// conversation.send and knowledge notifications (protocol §4, §5; design §6)
+// ---------------------------------------------------------------------------
+
+/** `conversation.send`'s event `reply.delta`: the next piece of the reply, in order. */
+export interface ReplyDelta {
+  text: string;
+}
+
+/**
+ * `conversation.send`'s result, sent once the assistant turn is stored
+ * (`runTurn`, src/pipeline/session.ts). `turn` is the user turn the request
+ * appended; its knowledge run follows as `knowledge.event` notifications.
+ */
+export interface SendResult {
+  turn: TurnDTO;
+  assistantTurn: TurnDTO;
+  contextNotes: ContextNote[];
+}
+
+/**
+ * `knowledge.event` notification data: one `KnowledgeEvent` of a knowledge
+ * run this server executes, keyed by the session and the **user** turn whose
+ * run it is. `summary` (`formatKnowledgeSummary`) is set only on `done`,
+ * which ends the run. The `deferred` and `interrupted` variants (CR-5) are
+ * not emitted before T2.3.
+ */
+export interface KnowledgeEventData {
+  sessionId: string;
+  turnId: string;
+  event: KnowledgeEvent;
+  summary?: string;
 }
 
 /** `watchTick`'s result (src/cli/watch.ts). */
