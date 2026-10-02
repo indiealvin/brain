@@ -63,6 +63,22 @@ describe("conversation store (spec §4.5, §27; design §5)", () => {
     expect(b.getTurns(s)).toHaveLength(3);
   });
 
+  test("turn ids come from the file on every append, never from a per-instance cache (CR-9)", () => {
+    // Two writers on one session, e.g. the app and `brain chat --session` in a terminal, each with its own store.
+    const a = openConversationStore(dir);
+    const b = openConversationStore(dir);
+    const s = a.createSession();
+    const t1 = a.appendTurn(s, "user", "from a");
+    const t2 = b.appendTurn(s, "assistant", "from b");
+    const t3 = a.appendTurn(s, "user", "from a again"); // a cached count would hand out 000002 a second time
+    const t4 = b.appendTurn(s, "assistant", "from b again");
+    expect([t1, t2, t3, t4].map((t) => t.turnId)).toEqual(["000001", "000002", "000003", "000004"]);
+    const ids = a.getTurns(s).map((t) => t.turnId);
+    expect(ids).toEqual(["000001", "000002", "000003", "000004"]);
+    expect(b.getTurns(s)).toEqual(a.getTurns(s));
+    expect(new Set(ids.map((id) => turnUri({ sessionId: s, turnId: id }))).size).toBe(4);
+  });
+
   test("listSessions reports each session with its turn count, sorted by id; unknown ids are empty", () => {
     const store = openConversationStore(dir);
     const s1 = store.createSession();

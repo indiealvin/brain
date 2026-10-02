@@ -4,6 +4,12 @@
  *   append user turn → reply (one model call) → append assistant turn →
  *   return; knowledge maintenance starts in the background.
  *
+ * The session's turn lock (CR-9, `src/conversation/turnLock.ts`) is held
+ * from the user append to the assistant append, and released on every path
+ * (reply success, reply failure, any exception) before knowledge maintenance
+ * starts. A second writer to the same session waits up to the bound and then
+ * fails with `SessionBusyError` (`SESSION_BUSY`), without appending anything.
+ *
  * The returned `knowledge` promise never rejects (failures land in
  * `errors[]`), so callers may ignore it, subscribe with `onKnowledge`, or
  * await it (`awaitKnowledge`). Knowledge runs for the same session are
@@ -13,11 +19,13 @@
  */
 import type { BrainConfig, ConversationTurn, EmbeddingProvider, ModelProvider, RepoCoordinator } from "../core/types";
 import type { ConversationStore } from "../conversation/store";
+import { withTurnLock } from "../conversation/turnLock";
 import type { IndexDb } from "../index/schema";
 import { replyToTurn, type ContextNote } from "./chat";
 import { processTurnForKnowledge, type KnowledgeEvent, type KnowledgeUpdate } from "./knowledge";
 
 export interface SessionDeps {
+  /** Knowledge runs submit through it; its `paths.runtimeDir` holds the sessions' turn locks. */
   coord: RepoCoordinator;
   db: IndexDb;
   model: ModelProvider;
@@ -89,12 +97,17 @@ export async function runTurn(deps: SessionDeps, sessionId: string, userText: st
   const { store } = deps;
   if (!store.hasSession(sessionId)) throw new Error(`unknown session ${sessionId}`);
 
-  const turn = store.appendTurn(sessionId, "user", userText);
-  const all = store.getTurns(sessionId);
-  const replyWindow = Math.max(1, deps.replyWindow ?? DEFAULT_REPLY_WINDOW);
-  const { reply, contextNotes } = await replyToTurn(deps, all.slice(Math.max(0, all.length - replyWindow)), opts.onDelta ? { onDelta: opts.onDelta } : {});
-  const assistantTurn = store.appendTurn(sessionId, "assistant", reply);
+  // Throws SessionBusyError when another writer holds the session past the bound; nothing is appended then.
+  const { turn, reply, contextNotes, assistantTurn } = await withTurnLock(deps.coord.paths.runtimeDir, sessionId, async () => {
+    const turn = store.appendTurn(sessionId, "user", userText);
+    const all = store.getTurns(sessionId);
+    const replyWindow = Math.max(1, deps.replyWindow ?? DEFAULT_REPLY_WINDOW);
+    const { reply, contextNotes } = await replyToTurn(deps, all.slice(Math.max(0, all.length - replyWindow)), opts.onDelta ? { onDelta: opts.onDelta } : {});
+    const assistantTurn = store.appendTurn(sessionId, "assistant", reply);
+    return { turn, reply, contextNotes, assistantTurn };
+  });
 
+  // The turn lock is released: knowledge runs outside it (design §5.4), chained per session in this process.
   const knowledgeDeps = { coord: deps.coord, db: deps.db, model: deps.model, embeddings: deps.embeddings, config: deps.config, today: deps.today ?? todayIso(), ...(deps.log ? { log: deps.log } : {}) };
   const knowledge: Promise<KnowledgeUpdate> = chain(sessionId, () =>
     processTurnForKnowledge(knowledgeDeps, store.getTurns(sessionId), { ...(opts.window !== undefined ? { window: opts.window } : {}) }),
