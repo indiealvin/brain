@@ -37,10 +37,10 @@ waits for.
 | T3.2 | BrainKit: spawn the child, JSONL codec, request correlation, notification stream, `Codable` DTOs with `unknown(String)` enum cases, `UNKNOWN_METHOD` treated as "feature absent". Replay `test/rpc/transcripts/*.jsonl` in the Swift tests: decode `msg` only, and skip `test` lines (protocol §9) | T1.3 | **yes** |
 | T3.3 | First run and Settings: repo picker, `repo.init`, `doctor.run`, keys in Keychain passed as `initialize.env`, restart the child when settings change, warn when the `brain` on `PATH` differs from the bundled one | T1.3, T0.9 | **yes** |
 | T3.4 | Conversation: sessions, streaming `reply.delta`, `SESSION_BUSY` handling. Per-turn knowledge chips appear only after T2.5 | T1.5 | **yes** |
-| T3.6 | Proposal Inbox: diff rendering (`FileDiff`, including `beforeUnavailable`), accept / reject, the `REPLAN` → "note changed" experience | T1.6, T1.8 | accept / reject: **yes**; diffs: no |
-| T3.7 | Knowledge Browser and Search: `notes.*`, pending-integration badges, "Open in external editor" | T1.4, T1.8 | no |
+| T3.6 | Proposal Inbox: diff rendering (`FileDiff`, including `beforeUnavailable`), accept / reject, the `REPLAN` → "note changed" experience | T1.6, T1.8 | **yes** |
+| T3.7 | Knowledge Browser and Search: `notes.*`, pending-integration badges, "Open in external editor" | T1.4, T1.8 | **yes** |
 | T3.5 | Activity and notifications. The backlog views appear only after T2.5 | T1.7 | **yes** |
-| T3.8 | History and diff views | T1.8 | no |
+| T3.8 | History and diff views | T1.8 | **yes** |
 | T3.9 | Quick Capture panel and menu bar. The menu bar part (status, pending proposals, open app) needs only `repo.status` and `engine.status`, so it can ship in the first version. Only the capture panel waits for T2.4 | menu bar: T1.7; capture: T2.4 (needs CR-5) | menu bar: **yes**; capture: no |
 
 **First version (owner decision, 2026-10-02):** T3.1–T3.8 plus the menu
@@ -100,5 +100,21 @@ T3.6 and T3.7.
   - `engine.humanSync` reports only the watcher's commits. An edit
     committed by integration's own sync pass shows as `repo.changed` with
     `"git"`. Refresh views on `repo.changed`, not on `engine.humanSync`.
+- Decoding notes from T1.8:
+  - `FileDiff.unified` starts with `--- a/<path>` / `+++ b/<path>`
+    (`/dev/null` for a missing side), with no `diff --git` or `index`
+    lines. Hunk headers are bare `@@ -l,s +l,s @@`: Git's function-context
+    text is removed. A binary pair is the single line
+    `Binary files … differ`, with zero counts.
+  - A proposal write whose content equals the snapshot is still listed,
+    with `unified: ""` and zero counts.
+  - `beforeUnavailable: true` comes with `unified: null` and zero counts;
+    show the after content (`writes[].content`) only.
+  - `HistoryEntry.actor` is `"human"` for a commit without an `Actor`
+    trailer, such as the user's own `git revert`.
+  - `history.list` pages with `before` = the last entry's `sha`, until it
+    returns `[]`. An unknown `sha` or `before` is `INVALID_PARAMS`.
+  - `proposals.get` takes the worktree lock, like `proposals.list`, so it
+    can wait behind a long write in another process. Show a loading state.
 - One `runtime/locks/turn-<sessionId>.sqlite` file per session accumulates
   over time. That is expected; cleanup can come later.

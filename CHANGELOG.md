@@ -25,7 +25,9 @@ heading to `## vX.Y.Z — YYYY-MM-DD` in the change that bumps the version.
   - `proposals.accept` / `proposals.reject`, with `proposals.changed`;
   - the server runs the watch loop when no `brain watch` owns it, takes it
     over when `brain watch` exits, and reports changes made by any process
-    as `repo.changed`.
+    as `repo.changed`;
+  - `proposals.get` with the proposal's diff, `history.list` /
+    `history.diff` over `main`, and `repo.pendingIntegration`.
 
 ## v0.2.0 — 2026-10-02
 

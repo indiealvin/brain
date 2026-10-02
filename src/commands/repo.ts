@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { openCoordinator, type ProposalsChangedListener } from "../core/coordinator";
+import { openCoordinator, type ProposalDetail, type ProposalsChangedListener } from "../core/coordinator";
 import type { ExecutionResult, IntegrationResult, MutationState, ReconcileResult, RepoCoordinator, SyncResult } from "../core/types";
 import { fastForwardAgentToMain, pendingIntegration, type PendingIntegration } from "../git/worktree";
 import { indexedCommitOf, openIndex } from "../index/schema";
@@ -34,16 +34,21 @@ export function findRepoRoot(start: string): string | null {
 }
 
 /**
- * `drainQueued` (execute every QUEUED mutation, then integrate) and
+ * `drainQueued` (execute every QUEUED mutation, then integrate),
  * `onProposalsChanged` (this process's proposal writes, for the RPC
- * server's `proposals.changed`) are implemented by the concrete coordinator
- * but are not part of the read-only `RepoCoordinator` seam, so the open
- * sequence checks for them at runtime.
+ * server's `proposals.changed`) and `proposalDetail` (a proposal and its
+ * review diff, in one locked section) are implemented by the concrete
+ * coordinator but are not part of the read-only `RepoCoordinator` seam, so
+ * the open sequence checks for them at runtime.
  */
 export type Coord = RepoCoordinator & {
   drainQueued(): Promise<ExecutionResult[]>;
   onProposalsChanged(listener: ProposalsChangedListener): () => void;
+  proposalDetail(proposalId: string): Promise<ProposalDetail>;
 };
+
+/** The methods of `Coord` beyond the `RepoCoordinator` seam, checked by `openRepo`. */
+const COORD_EXTENSIONS = ["drainQueued", "onProposalsChanged", "proposalDetail"] as const;
 
 export interface OpenedRepo {
   coord: Coord;
@@ -67,7 +72,7 @@ export interface OpenedRepo {
  */
 export async function openRepo(repoDir: string): Promise<OpenedRepo> {
   const opened = await openCoordinator(repoDir);
-  for (const method of ["drainQueued", "onProposalsChanged"] as const) {
+  for (const method of COORD_EXTENSIONS) {
     if (typeof (opened as Partial<Coord>)[method] !== "function") {
       await opened.close();
       throw new ServiceError("INTERNAL", `coordinator does not implement ${method}()`);

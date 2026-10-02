@@ -18,7 +18,10 @@
  *   this run's BRAIN_HOME (another writer under CR-1; coreChild.ts):
  *   - `{op: "submit", mutation, expect?}`: `coord.submit`; fails unless the
  *     resulting state is `expect`, when given;
- *   - `{op: "submitProposal", proposal}`: `coord.submitProposal`.
+ *   - `{op: "submitProposal", proposal}`: `coord.submitProposal`;
+ *   - `{op: "syncOnce", expect?}`: a Human Sync pass that finds every edit
+ *     quiescent (a `human-sync` commit); fails unless `committed` is
+ *     `expect`, when given.
  *   A `present` target (or proposal target) without `noteId` / `blobHash`
  *   gets them from agent HEAD at that point; a write may give `note` (a
  *   `NoteSpec`) instead of `content`. See coreChild.ts for the defaults.

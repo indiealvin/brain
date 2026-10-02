@@ -5,8 +5,9 @@
  * Locking model (spec §12, I-11; CR-1, docs/mac-app/design.md §5.2): every
  * public method that writes — `submit`, `execute`, `drainQueued`,
  * `integrate`, `rebuild`, `syncOnce`, `recover`, `reconcileIndex`,
- * `acceptProposal`, `rejectProposal` and `listProposals` (it writes STALE
- * marks) — runs through `exclusive()`: the in-process mutex (`Serial`) first,
+ * `acceptProposal`, `rejectProposal`, and `listProposals` and
+ * `proposalDetail` (they write STALE marks) — runs through `exclusive()`:
+ * the in-process mutex (`Serial`) first,
  * then the cross-process RepoWorktreeLock, taken exactly once at the top.
  * Everything those methods call (`*Unlocked`, `integrateOnce`,
  * `rebuildAgentBranch`, `executeMutation`, Human Sync) runs without taking
@@ -71,6 +72,7 @@ import { serializeNote } from "../markdown/serialize";
 import { slugKey } from "./slug";
 import { mutationId as newMutationId } from "./ids";
 import { blobAt, showFile } from "../git/git";
+import { proposalDiff, type FileDiff } from "../git/diff";
 import { reconcileIndex as reconcileIndexFiles } from "../index/reconcile";
 import { syncOnce as humanSyncOnce } from "../sync/humanSync";
 import { assertLockNotHeldInThisChain, withRepoWorktreeLock, WORKTREE_LOCK } from "../sync/lock";
@@ -114,6 +116,12 @@ async function holdDecisionForTests(): Promise<void> {
 
 /** Told the ids of the proposals this process just created, decided or marked STALE (`onProposalsChanged`). */
 export type ProposalsChangedListener = (proposalIds: string[]) => void;
+
+/** A proposal with its review diff, one `FileDiff` per write (`proposalDetail`; protocol `proposals.get`). */
+export interface ProposalDetail {
+  proposal: Proposal;
+  diff: FileDiff[];
+}
 
 /**
  * The mutation an accepted proposal runs as (§34): its preconditions are the
@@ -477,6 +485,26 @@ class Coordinator implements RepoCoordinator {
     const pending = this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
     this.proposalsChangedInSection(pending);
     return [...pending, ...this.staleReplannedAccepts()];
+  }
+
+  /**
+   * One proposal and its review diff (CR-4; `proposals.get`,
+   * docs/mac-app/protocol.md §4), in one locked section: the staleness
+   * refresh `listProposals` runs (I-19, then the `REPLAN` → STALE check),
+   * then the diff of each write against its target's snapshot blob
+   * (`proposalDiff`). Nothing moves agent HEAD between the two, so a
+   * proposal still PENDING has every snapshot at agent HEAD, and its before
+   * side is readable (protocol §7). STALE marks are reported like those of
+   * any section (`onProposalsChanged`). Throws `UnknownProposalError` for an
+   * unknown id, before refreshing anything. Not part of `RepoCoordinator`.
+   */
+  async proposalDetail(proposalId: string): Promise<ProposalDetail> {
+    return this.exclusive(async () => {
+      if (!this.proposals.get(proposalId)) throw new UnknownProposalError(proposalId);
+      this.refreshProposalStaleness();
+      const proposal = this.proposals.get(proposalId)!;
+      return { proposal, diff: proposalDiff(this.paths.userWorktree, proposal) };
+    });
   }
 
   /** A single insert outside the lock (design §5.2); a new proposal is reported at once. */
