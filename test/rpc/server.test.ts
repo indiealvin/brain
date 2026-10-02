@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
-import { NoModelError, ServiceError, UnknownSessionError } from "../../src/commands/errors";
+import { NoModelError, ServiceError, UnknownNoteError, UnknownSessionError, UnknownTurnError } from "../../src/commands/errors";
 import { SessionBusyError } from "../../src/conversation/turnLock";
 import { ConfigError } from "../../src/markdown/repo";
 import { ClaudeModelProvider, ModelProviderError } from "../../src/model/claude";
@@ -483,6 +483,8 @@ describe("errors (protocol §6)", () => {
       [new NoModelError("m"), { code: "NO_MODEL", message: "m" }],
       [new ServiceError("INTERNAL", "m"), { code: "INTERNAL", message: "m" }],
       [new UnknownSessionError("s1", "m"), { code: "UNKNOWN_SESSION", message: "m", data: { sessionId: "s1" } }],
+      [new UnknownNoteError("n1"), { code: "UNKNOWN_NOTE", message: "unknown note n1", data: { noteId: "n1" } }],
+      [new UnknownTurnError("s1", "000009"), { code: "INVALID_PARAMS", message: "turn 000009 is not in session s1", data: { sessionId: "s1", beforeTurnId: "000009" } }],
       [new UnknownProposalError("p1"), { code: "UNKNOWN_PROPOSAL", message: "unknown proposal p1", data: { proposalId: "p1" } }],
       [new ProposalNotPendingError("p1", "ACCEPTED"), { code: "PROPOSAL_NOT_PENDING", message: expect.any(String), data: { proposalId: "p1", status: "ACCEPTED" } }],
       [new SessionBusyError("s1"), { code: "SESSION_BUSY", message: expect.any(String), data: { sessionId: "s1" } }],

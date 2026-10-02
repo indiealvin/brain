@@ -13,8 +13,12 @@
  * knowledge updates that shutdown must wait for, and `onClose` / `onStopLoop`
  * for resources the drain must release.
  */
+import { registerConversationMethods } from "./methods/conversation";
 import { registerFirstRunMethods } from "./methods/firstRun";
 import { registerLifecycleMethods } from "./methods/lifecycle";
+import { registerNotesMethods } from "./methods/notes";
+import { registerProposalMethods } from "./methods/proposals";
+import { registerRepoMethods } from "./methods/repo";
 import { RpcServer, type RpcServerOptions } from "./server";
 
 export { RpcServer, type MethodDef, type RequestContext, type RpcServerOptions, type RpcSession } from "./server";
@@ -24,5 +28,9 @@ export function createRpcServer(opts: RpcServerOptions): RpcServer {
   const server = new RpcServer(opts);
   registerLifecycleMethods(server);
   registerFirstRunMethods(server);
+  registerRepoMethods(server);
+  registerConversationMethods(server);
+  registerNotesMethods(server);
+  registerProposalMethods(server);
   return server;
 }

@@ -8,6 +8,17 @@
 import type { ExecutionResult, Proposal, ProposalStatus, RepoCoordinator } from "../core/types";
 import { UnknownProposalError } from "../proposal/store";
 
+/** Every `ProposalStatus`, in lifecycle order. */
+export const PROPOSAL_STATUSES: readonly ProposalStatus[] = ["PENDING", "ACCEPTED", "REJECTED", "STALE"];
+
+/** A proposal without its materialized `writes` (docs/mac-app/protocol.md §7): what a list shows. */
+export type ProposalSummary = Omit<Proposal, "writes">;
+
+export function proposalSummary(p: Proposal): ProposalSummary {
+  const { writes: _writes, ...summary } = p;
+  return summary;
+}
+
 /** Every proposal (or those in `status`), oldest first, after a staleness refresh. */
 export async function proposalsList(coord: RepoCoordinator, opts: { status?: ProposalStatus } = {}): Promise<Proposal[]> {
   const all = await coord.listProposals();

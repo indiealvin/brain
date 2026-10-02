@@ -7,7 +7,7 @@
  * adapters map those themselves (`UnknownProposalError`,
  * `ProposalNotPendingError`, `SessionBusyError`).
  */
-export type ServiceErrorCode = "NO_MODEL" | "UNKNOWN_SESSION" | "INTERNAL";
+export type ServiceErrorCode = "NO_MODEL" | "UNKNOWN_SESSION" | "UNKNOWN_NOTE" | "INVALID_PARAMS" | "INTERNAL";
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode;
@@ -33,5 +33,31 @@ export class UnknownSessionError extends ServiceError {
     super("UNKNOWN_SESSION", message);
     this.name = "UnknownSessionError";
     this.sessionId = sessionId;
+  }
+}
+
+/** A note id the index (the projection of agent HEAD) does not hold, or whose file is not at agent HEAD. */
+export class UnknownNoteError extends ServiceError {
+  readonly noteId: string;
+  constructor(noteId: string, message = `unknown note ${noteId}`) {
+    super("UNKNOWN_NOTE", message);
+    this.name = "UnknownNoteError";
+    this.noteId = noteId;
+  }
+}
+
+/**
+ * A turn id that is not in its session: `conversation.get`'s `beforeTurnId`.
+ * Turns are never removed, so a client paging with the ids it was given never
+ * sees this. It is a bad parameter (`INVALID_PARAMS`), not a missing record.
+ */
+export class UnknownTurnError extends ServiceError {
+  readonly sessionId: string;
+  readonly turnId: string;
+  constructor(sessionId: string, turnId: string) {
+    super("INVALID_PARAMS", `turn ${turnId} is not in session ${sessionId}`);
+    this.name = "UnknownTurnError";
+    this.sessionId = sessionId;
+    this.turnId = turnId;
   }
 }

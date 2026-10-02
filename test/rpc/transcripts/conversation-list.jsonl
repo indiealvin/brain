@@ -1,0 +1,15 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z1948WZWKC581BJWR0V37Y","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"5b7c1d8ad76f63d3eebe1954865e74eaf643e2fa"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z1948WZWKC581BJWR0V37Y","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z1948WZWKC581BJWR0V37Y","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"1","method":"conversation.list","params":{}}}
+{"dir":"s2c","msg":{"id":"1","type":"result","data":[]}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-09-30T08:00:00.000Z","turns":[{"role":"user","text":"Should we ship the migration in one go?","at":"2026-09-30T08:00:05.000Z"},{"role":"assistant","text":"Smaller batches keep each step reversible.","at":"2026-09-30T08:00:09.000Z"}]}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S2","createdAt":"2026-10-01T08:00:00.000Z","turns":[]}}
+{"dir":"c2s","msg":{"id":"2","method":"conversation.create","params":{}}}
+{"dir":"s2c","msg":{"id":"2","type":"result","data":{"sessionId":"01M3Z196KJF1C0RNKRE99HAKCW"}},"match":{"/data/sessionId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"3","method":"conversation.list","params":{}}}
+{"dir":"s2c","msg":{"id":"3","type":"result","data":[{"sessionId":"01JA00000000000000000000S1","createdAt":"2026-09-30T08:00:00.000Z","turns":2},{"sessionId":"01JA00000000000000000000S2","createdAt":"2026-10-01T08:00:00.000Z","turns":0},{"sessionId":"01M3Z196KJF1C0RNKRE99HAKCW","createdAt":"2026-10-02T19:25:58.258Z","turns":0}]},"match":{"/data/2/sessionId":"<ulid>","/data/2/createdAt":"<iso>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

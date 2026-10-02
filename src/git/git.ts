@@ -139,6 +139,19 @@ export function lsTree(repo: string, tree: string): TreeEntry[] {
   return entries;
 }
 
+/**
+ * Paths whose content differs between trees `from` and `to` (commits, trees
+ * or refs), in Git's path order. Plumbing (`diff-tree`), so the user's diff
+ * config never applies, and without rename detection: a rename lists both
+ * its old and its new path. Empty when the trees are identical.
+ */
+export function changedPaths(repo: string, from: string, to: string): string[] {
+  const args = ["diff-tree", "-r", "-z", "--name-only", "--no-renames", from, to];
+  const r = runGit(repo, args);
+  if (r.code !== 0) throw new GitError(repo, args, r);
+  return r.stdout.split("\0").filter((p) => p !== "");
+}
+
 /** Paths of `*.md` files in `tree` whose slug matches `slug` (case-insensitive, normalized). */
 export function pathsWithSlug(repo: string, tree: string, slug: string): string[] {
   const key = slugKey(slug);
