@@ -44,7 +44,8 @@ import type { Coord } from "../commands/repo";
 import { applyUserConfigToEnv, loadUserConfig, type UserConfig } from "../config/userConfig";
 import type { EmbeddingProvider, ModelProvider } from "../core/types";
 import type { SessionDeps } from "../pipeline/session";
-import type { EngineInfo, ProviderEnv, WireError } from "./dto";
+import type { ProviderEnv, WireError } from "./dto";
+import type { RpcEngine } from "./engine";
 import { RpcError, toWireError, type RpcErrorCode } from "./errors";
 import { watchProposalChanges } from "./methods/proposals";
 import { isPlainObject, type Params } from "./params";
@@ -66,7 +67,8 @@ export interface RpcSession {
   env: NodeJS.ProcessEnv;
   /** `initialize.env` as the client sent it (allowlisted keys only). */
   providerEnv: ProviderEnv;
-  engine: EngineInfo;
+  /** Loop ownership, the loop, `engine.tick` and the `repo.changed` poller (T1.7). Stopped in shutdown step 2, closed in step 5. */
+  engine: RpcEngine;
 }
 
 /** What a method handler gets for one request. */
@@ -337,7 +339,7 @@ export class RpcServer {
    *
    * 1. Stop accepting requests: later ones get `SHUTTING_DOWN`.
    * 2. Stop scheduling loop ticks and polls and wait for the tick in flight
-   *    (`onStopLoop` hooks; none before T1.7).
+   *    (`onStopLoop` hooks: the engine's, registered by `initialize`).
    * 3. Wait for the underlying work of every request, including cancelled ones.
    * 4. Wait for knowledge updates in flight (`knowledge`; pre-CR-5 form).
    * 5. Close resources (`onClose` hooks, last registered first: the

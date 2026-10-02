@@ -166,12 +166,18 @@ running. The server then
 try-locks the loop-owner lock (CR-10, `design.md` §5.3 item 2):
 
 - If it gets the lock, `loopOwner` is `"self"`, and the server runs the
-  Human Sync watcher and `watchTick` (`src/cli/watch.ts:94`) in process.
+  Human Sync watcher and `watchTick` (`src/cli/watch.ts:96`) in process,
+  the same loop as `brain watch` (`createWatchLoop`, `src/cli/watch.ts:171`),
+  starting with a forced tick. The result reports this acquisition; no
+  `engine.loopOwner` is sent for it.
 - If not, `loopOwner` is `"other"`, and the server tries again every
   `intervalMs`. When it gets the lock, for example because `brain watch`
-  exited or was killed, it starts the loop and emits `engine.loopOwner`.
+  exited or was killed, it emits `engine.loopOwner` and starts the loop
+  with a forced tick.
 
-In both cases the server polls for `repo.changed` (§5).
+In both cases the server polls for `repo.changed` (§5). The loop, the
+polls and the later try-locks start once the `initialize` result is sent,
+so no notification precedes it.
 
 Errors: `PROTOCOL_MISMATCH`, `NOT_A_REPO`, `ALREADY_INITIALIZED` (for a
 second `initialize`), `INTERNAL`.
@@ -183,7 +189,7 @@ second `initialize`), `INTERNAL`.
 1. Stop accepting requests. Any request that arrives later gets
    `SHUTTING_DOWN`.
 2. Stop scheduling loop ticks and polls, and wait for the tick in flight
-   (as `brain watch` does, `src/cli.ts:516`).
+   (as `brain watch` does, `src/cli.ts:502`).
 3. Wait for the **underlying work** of every request to finish. A
    terminal message is not enough. A cancelled request has already sent
    `CANCELLED`, but its model call and turn storage continue (§3
@@ -233,7 +239,7 @@ knowledge run still happens.
 | `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:293`. Same method as before `initialize`; `repoPath` defaults to the initialized repo |
 | `repo.pendingIntegration` | `{}` | `{mainHead, agentHead, paths: string[]}` | new, CR-4: paths that differ between `main` and agent HEAD (`design.md` §8) |
 | `engine.status` | `{}` | `EngineInfo & {lastTick?: EngineTick}` | RPC |
-| `engine.tick` | `{}` | `EngineTick` | `watchTick(…, {force: true})`, `src/cli/watch.ts:94`. Allowed whatever the loop owner (safe under CR-1). |
+| `engine.tick` | `{}` | `EngineTick` | `watchTick(…, {force: true})`, `src/cli/watch.ts:96`. Allowed whatever the loop owner (safe under CR-1). It runs after this server's tick in flight, never alongside it |
 
 ### Conversation
 
@@ -341,10 +347,10 @@ method in v1 (`design.md` §14.1).
 | `knowledge.event` | `{sessionId, turnId, event: KnowledgeEvent, summary?: string}` | Every `KnowledgeEvent` of a run executed by this server. `summary` is set only on `event.type === "done"` and comes from `formatKnowledgeSummary` (`src/pipeline/knowledge.ts:216`). Every run ends with `done`, also one that failed inside; its failure is in `update.errors`. CR-5 adds two variants. `{type: "deferred", reason: string}` means the run will be retried (`design.md` §5.5 item 4). `{type: "interrupted"}` means a run is finished without being re-run after a crash (item 6). Both are additive (§8) |
 | `repo.changed` | `RepoChanged` (below) | Some domain changed, whoever changed it: this process, `brain watch`, or a CLI command. The server checks every `intervalMs` whatever the loop owner. The client re-fetches the views of the listed domains |
 | `proposals.changed` | `{}` | This process created or decided a proposal, or a `proposals.list` / `proposals.get` refresh marked one STALE. Precisely: one per proposal this process created, and one per operation of this process that decided or marked STALE any proposal. Those operations are an accept or a reject (including the staleness refresh each runs first), the refresh of `proposals.list`, `proposals.get` or a knowledge run's planning, and a drain's accept reconciliation. An operation that changed nothing sends none, for example an accept that returns `REPLAN` / `"STALE"` for a proposal already decided. Another process's changes are reported only by `repo.changed`. It is sent immediately, without waiting for the next check. The next `repo.changed` also lists `"proposals"` |
-| `engine.loopOwner` | `EngineInfo` | This server acquired the loop-owner lock and started its loop (`design.md` §5.3 item 2). It never loses the lock while running, so there is no reverse transition |
+| `engine.loopOwner` | `EngineInfo` | This server acquired the loop-owner lock after `initialize` and started its loop (`design.md` §5.3 item 2). An acquisition at `initialize` is reported by its result instead (§3). It never loses the lock while running, so there is no reverse transition |
 | `engine.tick` | `EngineTick` | Only when `loopOwner: "self"`: after ticks where `changed` is true, or where drained results include a state other than `INTEGRATED` |
-| `engine.humanSync` | `{sha}` | Only when `loopOwner: "self"`: Human Sync committed quiescent edits (`SyncResult.committed`, `src/core/types.ts:298`) |
-| `engine.error` | `{message}` | The loop caught an error (`src/cli.ts:503`). Informational only |
+| `engine.humanSync` | `{sha}` | Only when `loopOwner: "self"`: the loop's Human Sync watcher committed quiescent edits (`SyncResult.committed`, `src/core/types.ts:298`). Integration runs a Human Sync pass of its own first (`docs/spec.md` §15); a commit made there is not reported here, and shows as `repo.changed` with `"git"` and an `engine.tick` |
+| `engine.error` | `{message}` | The loop caught an error (`onError` of `createWatchLoop`, `src/cli/watch.ts:200`; `brain watch` logs the same error). Redacted. Informational only |
 
 ```ts
 interface RepoChanged {

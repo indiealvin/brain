@@ -1,0 +1,17 @@
+{"asserts":{"notifications":["engine.loopOwner","repo.changed"]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z4Z04FGB2EPE2YZSA9P07D","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"1877a2f0550b972c865bf151f02087cdfbbac261"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"test","step":{"op":"repo.writeNote","repo":"/tmp/brain-transcript/notes","path":"knowledge/loop-owner.md","note":{"id":"01JA0000000000000000000001","created":"2026-10-02","type":"idea","title":"Loop owner","sections":{"Claim":"One process per repo runs the loop."}},"commit":"user: seed note"}}
+{"dir":"test","step":{"op":"watch.spawn","repo":"/tmp/brain-transcript/notes","args":["--interval","100","--no-embeddings"]}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"},"engine":{"intervalMs":100}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z4Z04FGB2EPE2YZSA9P07D","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z4Z04FGB2EPE2YZSA9P07D","engine":{"loopOwner":"other","owner":{"kind":"watch","pid":1469719},"intervalMs":100}}},"match":{"/data/engine/owner/pid":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"before","method":"engine.status","params":{}}}
+{"dir":"s2c","msg":{"id":"before","type":"result","data":{"loopOwner":"other","owner":{"kind":"watch","pid":1469719},"intervalMs":100}},"match":{"/data/owner/pid":"<any>"}}
+{"dir":"test","step":{"op":"watch.stalePid","repo":"/tmp/brain-transcript/notes"}}
+{"dir":"test","step":{"op":"watch.kill","signal":"SIGKILL","loopOwnerWithinMs":3000}}
+{"dir":"s2c","msg":{"type":"engine.loopOwner","data":{"loopOwner":"self","intervalMs":100}}}
+{"dir":"s2c","msg":{"type":"repo.changed","data":{"domains":["index"],"mainHead":"644c2b2088d1d355ff952677324f721ac39b583a","agentHead":"644c2b2088d1d355ff952677324f721ac39b583a","indexedCommit":"644c2b2088d1d355ff952677324f721ac39b583a","pendingProposals":0}},"match":{"/data/domains":{"$contains":["index"]},"/data/mainHead":"<any>","/data/agentHead":"<any>","/data/indexedCommit":"<any>"}}
+{"dir":"c2s","msg":{"id":"after","method":"engine.status","params":{}}}
+{"dir":"s2c","msg":{"id":"after","type":"result","data":{"loopOwner":"self","intervalMs":100,"lastTick":{"drained":[],"integration":{"status":"nothing-to-integrate","integratedMutationIds":[],"mainSha":"644c2b2088d1d355ff952677324f721ac39b583a"},"changed":false,"embedded":0}}},"match":{"/data/lastTick":"<any>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

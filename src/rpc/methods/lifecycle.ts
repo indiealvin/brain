@@ -6,19 +6,11 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { openRepo } from "../../commands/repo";
 import { CONFIG_FILE } from "../../markdown/repo";
-import { DEFAULT_ENGINE_INTERVAL_MS, PROTOCOL_VERSION, type EngineInfo, type InitializeResult } from "../dto";
+import { DEFAULT_ENGINE_INTERVAL_MS, PROTOCOL_VERSION, type InitializeResult } from "../dto";
+import { RpcEngine } from "../engine";
 import { invalidParams, RpcError } from "../errors";
 import { optionalObject, optionalPositiveInt, providerEnvParam, requireString, type Params } from "../params";
 import { BRAIN_VERSION, type RequestContext, type RpcServer } from "../server";
-
-/**
- * Before T1.7 the server takes no loop-owner lock and runs no loop, so it
- * reports the loop as someone else's, with no owner (implementation-plan §2):
- * a `brain watch` beside it is never blocked.
- */
-function stagingEngineInfo(intervalMs: number): EngineInfo {
-  return { loopOwner: "other", intervalMs };
-}
 
 interface ParsedInitialize {
   client: { name: string; version: string };
@@ -46,7 +38,11 @@ function parseInitialize(p: Params): ParsedInitialize {
 /**
  * `initialize` (protocol §3): build the private env, run the service layer's
  * open sequence (`openRepo`: recover, fast-forward the agent branch when
- * nothing is pending, reconcile the index), and report the session.
+ * nothing is pending, reconcile the index), then open the engine
+ * (src/rpc/engine.ts): take the `repo.changed` baseline and try-lock the
+ * loop-owner lock (CR-10). The result's `engine` says who runs the loop. The
+ * engine starts (the loop, polls, later try-locks) once the result is sent,
+ * so no notification precedes it.
  *
  * `repoPath` must be the knowledge repo root itself (brain.toml there), as
  * `--repo` is for the CLI; there is no walk-up. A failure returns the server
@@ -67,7 +63,16 @@ async function initialize(ctx: RequestContext): Promise<InitializeResult> {
     if (!existsSync(join(repoDir, CONFIG_FILE))) throw new RpcError("NOT_A_REPO", `${repoDir} is not a knowledge repo (no ${CONFIG_FILE}); create it with repo.init`);
     server.log(`rpc: initialize: ${p.client.name} ${p.client.version}, repo ${repoDir}, env keys [${Object.keys(p.env).join(", ")}]`);
     const { coord } = await openRepo(repoDir);
-    const engine = stagingEngineInfo(p.intervalMs);
+    let engine: RpcEngine;
+    try {
+      engine = await RpcEngine.open({ server, coord, intervalMs: p.intervalMs });
+    } catch (e) {
+      await coord.close();
+      throw e;
+    }
+    // Registered before the coordinator's own close hook, so (hooks run last registered first) the engine
+    // closes after the coordinator and the loop-owner lock is released last (protocol §3, shutdown step 5).
+    server.onClose(() => engine.close());
     server.completeInitialize({
       repoId: coord.config.repoId,
       userWorktree: coord.paths.userWorktree,
@@ -77,8 +82,11 @@ async function initialize(ctx: RequestContext): Promise<InitializeResult> {
       providerEnv: p.env,
       engine,
     });
+    server.onStopLoop(() => engine.stopLoop());
+    // Once this result is sent: the result goes out in promise reactions, which all run before a timer.
+    setTimeout(() => engine.start(), 0);
     const s = server.session;
-    return { protocolVersion: PROTOCOL_VERSION, brainVersion: BRAIN_VERSION, repoId: s.repoId, userWorktree: s.userWorktree, stateDir: s.stateDir, engine: { ...s.engine } };
+    return { protocolVersion: PROTOCOL_VERSION, brainVersion: BRAIN_VERSION, repoId: s.repoId, userWorktree: s.userWorktree, stateDir: s.stateDir, engine: engine.info() };
   } catch (e) {
     server.abandonInitialize();
     throw e;

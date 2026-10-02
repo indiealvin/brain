@@ -25,7 +25,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { CliError } from "./cli/errors";
 import { installWatchService, uninstallWatchService, watchServiceStatus } from "./cli/service";
-import { createWatchEmbedder, resolveWatchProvider, waitForLoopOwner, watchTick, type WatchEmbedder } from "./cli/watch";
+import { createWatchEmbedder, createWatchLoop, resolveWatchProvider, waitForLoopOwner, type WatchEmbedder } from "./cli/watch";
 import { createKnowledgeTracker, openSession, openSessionDeps, type KnowledgeTracker, type OpenedSessionDeps } from "./commands/conversation";
 import { ServiceError } from "./commands/errors";
 import { refreshIndex, search } from "./commands/notes";
@@ -53,7 +53,6 @@ import { formatKnowledgeSummary } from "./pipeline/knowledge";
 import { ProposalNotPendingError, UnknownProposalError } from "./proposal/store";
 import { runTurn, type SessionDeps } from "./pipeline/session";
 import { runStdioServer } from "./rpc/stdio";
-import { startHumanSyncWatcher } from "./sync/humanSync";
 import { setLockHolderKind } from "./sync/lock";
 
 const USER_CONFIG_FILE_HINT = "$BRAIN_HOME/config.toml";
@@ -487,33 +486,20 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<number> {
         }
         if (!stopping) {
           io.err(`watching ${coord.paths.userWorktree} (interval ${intervalMs}ms); Ctrl-C to stop`);
-          const clock = { now: () => Date.now() };
-          const syncWatcher = startHumanSyncWatcher(coord.paths, coord.config, clock, intervalMs, async (now) => {
-            const r = await coord.syncOnce(now);
-            if (r.committed) io.err(`human sync: committed ${short(r.sha ?? "")}`);
-            return r;
+          // The loop the RPC server runs too (src/cli/watch.ts): Human Sync through `coord.syncOnce`, then the
+          // new loop owner's forced tick (drain and integrate at once, and embed whatever the recovery reconcile
+          // left stale, including notes a `--no-embeddings` owner never embedded), then one tick per interval.
+          const loop = createWatchLoop({
+            coord,
+            embedder,
+            intervalMs,
+            log: io.err,
+            onHumanSync: (r) => io.err(`human sync: committed ${short(r.sha ?? "")}`),
+            onError: (e) => io.err(`watch loop error: ${e instanceof Error ? e.message : String(e)}`),
           });
-          const deps = { coord, embedder, log: io.err };
-          let running = false;
-          const tick = async (force: boolean) => {
-            if (running) return;
-            running = true;
-            try {
-              await watchTick(deps, { force });
-            } catch (e) {
-              io.err(`watch loop error: ${e instanceof Error ? e.message : String(e)}`);
-            } finally {
-              running = false;
-            }
-          };
-          // The new loop owner's forced tick: drain and integrate at once, and embed whatever the
-          // recovery reconcile left stale (including notes a `--no-embeddings` owner never embedded).
-          await tick(true);
-          const loop = setInterval(() => void tick(false), intervalMs);
+          void loop.start();
           await stopped;
-          clearInterval(loop);
-          syncWatcher.stop();
-          while (running) await new Promise((r) => setTimeout(r, 50)); // let an in-flight tick finish before closing the db
+          await loop.stop(); // lets an in-flight tick finish before the db is closed
         }
       } finally {
         try {
