@@ -257,7 +257,14 @@ and rejected in §15.
     journal state on every platform and asserts recovery correctness
     everywhere: the lock is acquired, uncommitted rows are invisible, and
     `integrity_check` passes. It requires a genuinely hot journal only on
-    Linux, where that path is verified.
+    Linux. After the spilling writer was strengthened to 20000 rows with
+    `cache_spill` explicitly on, the next macOS run (CI 37047160031) did
+    produce a genuine hot journal, and recovered it. So the hot-journal
+    path is now verified on both platforms. The same run passed all 448
+    tests on macOS, including the cross-process tests of this section:
+    test 1 (`singleWriter`), test 2 (proposal race), test 3 (SIGKILL with
+    two waiters) and test 4 (crash between ACCEPTED and enqueue). M0's
+    exit condition is met.
   - `flock(2)` through FFI is an acceptable alternative, with one
     condition: the lock file must be opened close-on-exec. `flock` locks
     follow inherited descriptors, so a spawned `git` process could
