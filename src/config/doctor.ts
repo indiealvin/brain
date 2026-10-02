@@ -8,8 +8,7 @@
  * `models.retrieve`) are skipped with `offline`.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
 import { repoPaths, resolveBrainHome } from "../core/brainHome";
 import { openCoordinator } from "../core/coordinator";
@@ -23,11 +22,16 @@ import {
   OPENROUTER_BASE_URL,
   type FetchLike,
 } from "../model/openrouter";
-import { isLockHeld, readLockHolder, WORKTREE_LOCK } from "../sync/lock";
+import { isLockHeld, LOOP_OWNER_LOCK, readLockHolder, WORKTREE_LOCK } from "../sync/lock";
 import { maskKey, userConfigPath } from "./userConfig";
 
 export const MIN_GIT_VERSION: readonly [number, number] = [2, 40];
-/** Written by `brain watch` under `<runtimeDir>/`; read here to tell whether a daemon is running. */
+/**
+ * Written by `brain watch` under `<runtimeDir>/` once it holds the loop-owner
+ * lock, and removed on a clean stop. Kept for compatibility only: it outlives
+ * a crashed daemon and its pid may be reused, so nothing reads it to decide
+ * anything (`loopOwnerCheck` reads the lock instead; CR-10).
+ */
 export const WATCH_PID_FILE = "watch.pid";
 /** A live holder of the worktree lock for longer than this is reported (design §5.2: the lock has no deadline). */
 export const LONG_HELD_LOCK_MS = 10 * 60_000;
@@ -128,6 +132,28 @@ export function worktreeLockCheck(runtimeDir: string, now = Date.now()): DoctorC
   const who = `held by ${holder.kind} (pid ${holder.pid}) for ${formatDuration(age)}`;
   if (age < LONG_HELD_LOCK_MS) return check("ok", who);
   return check("warn", `${who}; every other writer waits behind it — stop that process if it is hung`);
+}
+
+/**
+ * Loop ownership (CR-10; docs/mac-app/design.md §5.3 item 2): a momentary
+ * try-lock on the loop-owner lock tells whether some process runs the repo's
+ * loop; the informational side file names it (`brain watch`, later the RPC
+ * server). `watch.pid` is not consulted: after a crash it names a pid that
+ * may since have been reused, and a waiting `brain watch` does not run the
+ * loop. `service` (installed service state) is appended to the detail.
+ */
+export function loopOwnerCheck(runtimeDir: string, service: string): DoctorCheck {
+  const check = (status: CheckStatus, detail: string): DoctorCheck => ({ name: "watch", status, detail: `${detail}; ${service}`, required: false });
+  let held: boolean;
+  try {
+    held = isLockHeld(runtimeDir, LOOP_OWNER_LOCK);
+  } catch (e) {
+    return check("warn", `unknown (could not probe the loop-owner lock: ${errorMessage(e)})`);
+  }
+  if (!held) return check("info", "not running");
+  const holder = readLockHolder(runtimeDir, LOOP_OWNER_LOCK);
+  if (!holder || !pidAlive(holder.pid)) return check("ok", "running (holder unknown)");
+  return check("ok", `running (${holder.kind}, pid ${holder.pid})`);
 }
 
 async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
@@ -314,14 +340,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
         add("repo", "ok", `${opts.repoRoot} (repo_id ${coord.config.repoId})`, false);
         add("heads", "ok", `main ${main.slice(0, 12)}  agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`, false);
         add("queue", "ok", queue || "empty", false);
-        const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
-        const service = describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service));
-        if (!existsSync(pidFile)) add("watch", "info", `unknown (no ${pidFile}); ${service}`, false);
-        else {
-          const pid = Number(readFileSync(pidFile, "utf8").trim());
-          if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) add("watch", "ok", `running (pid ${pid}); ${service}`, false);
-          else add("watch", "warn", `not running (stale ${pidFile}); ${service}`, false);
-        }
+        checks.push(loopOwnerCheck(coord.paths.runtimeDir, describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service))));
       } finally {
         await coord.close();
       }

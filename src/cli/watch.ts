@@ -10,10 +10,15 @@
  * example `BRAIN_EMBEDDINGS=openrouter` without a key) disables embeddings
  * for the run with a single warning, and a runtime failure (network) is
  * logged at most once per `EMBED_ERROR_LOG_INTERVAL_MS`.
+ *
+ * Only the holder of the repo's loop-owner lock runs the loop (CR-10;
+ * docs/mac-app/design.md §5.3 item 2). `waitForLoopOwner` is how
+ * `brain watch` gets it.
  */
 import type { EmbeddingProvider, ExecutionResult, IntegrationResult } from "../core/types";
 import type { IndexDb } from "../index/schema";
 import { ensureEmbeddings } from "../retrieval/embeddings";
+import { acquireLock, LOOP_OWNER_LOCK, readLockHolder, type LockHandle, type LockHolderInfo } from "../sync/lock";
 
 export const EMBED_ERROR_LOG_INTERVAL_MS = 60_000;
 
@@ -100,4 +105,64 @@ export async function watchTick(deps: WatchTickDeps, opts: { force?: boolean } =
   let embedded = 0;
   if (deps.embedder !== null && (changed || opts.force === true)) embedded = await deps.embedder.run();
   return { drained, integration, changed, embedded };
+}
+
+/**
+ * Length of one bounded wait for the loop-owner lock. Between slices the
+ * waiter checks whether it was asked to stop, so this bounds how long a
+ * SIGINT / SIGTERM takes to end a waiting `brain watch`. Within a slice the
+ * lock primitive retries with its own short backoff, so a released lock is
+ * taken over within that backoff, not within a slice.
+ */
+export const LOOP_OWNER_WAIT_SLICE_MS = 250;
+
+export interface LoopOwnerWaitOptions {
+  /** Recorded in the lock's side file (`brain doctor`; later the RPC `EngineInfo.owner`). */
+  holderKind: string;
+  /** Polled between wait slices; once true, the wait gives up and resolves to null. */
+  stopped: () => boolean;
+  log: (line: string) => void;
+  /** Default `LOOP_OWNER_WAIT_SLICE_MS`. */
+  sliceMs?: number;
+}
+
+/** The one line a waiting `brain watch` logs about the current loop owner, from the informational side file. */
+export function describeLoopOwnerWait(holder: LockHolderInfo | null): string {
+  if (holder === null) return "watch: the loop for this repo is owned by another process; waiting until it exits";
+  const since = new Date(holder.acquiredAtMs).toISOString();
+  return `watch: the loop for this repo is owned by ${holder.kind} (pid ${holder.pid}, since ${since}); waiting until it exits`;
+}
+
+/**
+ * Wait, with no deadline, for the repo's loop-owner lock (CR-10). Resolves to
+ * the held handle, or to null once `stopped()` is true. The caller keeps the
+ * handle for the life of its loop and releases it when the loop ends; the lock
+ * module also keeps every held handle strongly reachable until then (design
+ * §5.2, GC note).
+ *
+ * The wait is asynchronous and cancellable: a sequence of bounded waits of
+ * `sliceMs`, checking `stopped()` in between. A plain blocking wait could not
+ * be cancelled, and its retry timer would keep a stopped process alive. When
+ * the first attempt finds the lock held, the holder named in the side file is
+ * logged once. The side file is informational only: whether the lock is free
+ * is decided by the lock alone, never by the side file or by `watch.pid`.
+ */
+export async function waitForLoopOwner(runtimeDir: string, opts: LoopOwnerWaitOptions): Promise<LockHandle | null> {
+  const sliceMs = opts.sliceMs ?? LOOP_OWNER_WAIT_SLICE_MS;
+  let first = true;
+  for (;;) {
+    if (opts.stopped()) return null;
+    const handle = await acquireLock(runtimeDir, LOOP_OWNER_LOCK, first ? { mode: "try" } : { mode: "bounded", timeoutMs: sliceMs }, { holderKind: opts.holderKind });
+    if (handle !== null) {
+      if (opts.stopped()) {
+        handle.release();
+        return null;
+      }
+      return handle;
+    }
+    if (first) {
+      opts.log(describeLoopOwnerWait(readLockHolder(runtimeDir, LOOP_OWNER_LOCK)));
+      first = false;
+    }
+  }
 }

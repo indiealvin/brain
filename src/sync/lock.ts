@@ -45,6 +45,8 @@ import { join } from "node:path";
 export const LOCKS_DIR = "locks";
 /** The repo worktree lock (CR-1; I-11). */
 export const WORKTREE_LOCK = "worktree";
+/** The repo's loop-owner lock (CR-10): its holder runs the Human Sync watcher and `watchTick`. */
+export const LOOP_OWNER_LOCK = "loop-owner";
 
 const MIN_BACKOFF_MS = 5;
 const MAX_BACKOFF_MS = 50;

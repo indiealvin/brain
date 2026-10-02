@@ -214,7 +214,7 @@ describe("watch service elsewhere", () => {
 });
 
 describe("brain doctor: watch service detection (offline, file existence only)", () => {
-  test("reports installed (systemd unit …) / installed (launchd …) / not installed next to the pid-file state", async () => {
+  test("reports installed (systemd unit …) / installed (launchd …) / not installed next to the loop-owner state", async () => {
     const bh = withBrainHome();
     const repo = makeTempKnowledgeRepo();
     try {
@@ -223,14 +223,14 @@ describe("brain doctor: watch service detection (offline, file existence only)",
 
       const none = await watchLine({ platform: "linux", home });
       expect(none.status).toBe("info");
-      expect(none.detail).toMatch(/^unknown \(no .*watch\.pid\); not installed; run brain watch --install$/);
+      expect(none.detail).toBe("not running; not installed; run brain watch --install");
 
       const { exec } = fakeExec();
       const linux = env({ platform: "linux", exec });
       installWatchService({ repoDir: repo.path, repoId: repo.repoId, intervalMs: 1000 }, linux);
       const unit = serviceSpec(repo.repoId, linux)!.path;
       expect((await watchLine({ platform: "linux", home })).detail).toContain(`installed (systemd unit ${unit})`);
-      expect((await watchLine({ platform: "linux", home })).detail).toStartWith("unknown (no ");
+      expect((await watchLine({ platform: "linux", home })).detail).toStartWith("not running; ");
       uninstallWatchService(repo.repoId, linux);
       expect((await watchLine({ platform: "linux", home })).detail).toContain("not installed; run brain watch --install");
 
