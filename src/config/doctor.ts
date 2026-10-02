@@ -11,8 +11,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
-import { resolveBrainHome } from "../core/brainHome";
+import { repoPaths, resolveBrainHome } from "../core/brainHome";
 import { openCoordinator } from "../core/coordinator";
+import { loadConfig } from "../markdown/repo";
 import { DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
 import {
@@ -22,11 +23,14 @@ import {
   OPENROUTER_BASE_URL,
   type FetchLike,
 } from "../model/openrouter";
+import { isLockHeld, readLockHolder, WORKTREE_LOCK } from "../sync/lock";
 import { maskKey, userConfigPath } from "./userConfig";
 
 export const MIN_GIT_VERSION: readonly [number, number] = [2, 40];
 /** Written by `brain watch` under `<runtimeDir>/`; read here to tell whether a daemon is running. */
 export const WATCH_PID_FILE = "watch.pid";
+/** A live holder of the worktree lock for longer than this is reported (design §5.2: the lock has no deadline). */
+export const LONG_HELD_LOCK_MS = 10 * 60_000;
 
 export type CheckStatus = "ok" | "fail" | "warn" | "skip" | "info";
 
@@ -93,6 +97,37 @@ function pidAlive(pid: number): boolean {
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/**
+ * The worktree lock (CR-1): a momentary try-lock tells whether anyone holds
+ * it; the informational side file names the holder. A live holder that has
+ * held it for `LONG_HELD_LOCK_MS` or more is a warning, since every other
+ * writer waits behind it.
+ */
+export function worktreeLockCheck(runtimeDir: string, now = Date.now()): DoctorCheck {
+  const check = (status: CheckStatus, detail: string): DoctorCheck => ({ name: "worktree lock", status, detail, required: false });
+  let held: boolean;
+  try {
+    held = isLockHeld(runtimeDir, WORKTREE_LOCK);
+  } catch (e) {
+    return check("warn", `could not probe: ${errorMessage(e)}`);
+  }
+  if (!held) return check("ok", "free");
+  const holder = readLockHolder(runtimeDir, WORKTREE_LOCK);
+  if (!holder || !pidAlive(holder.pid)) return check("info", "held (holder unknown)");
+  const age = Math.max(0, now - holder.acquiredAtMs);
+  const who = `held by ${holder.kind} (pid ${holder.pid}) for ${formatDuration(age)}`;
+  if (age < LONG_HELD_LOCK_MS) return check("ok", who);
+  return check("warn", `${who}; every other writer waits behind it — stop that process if it is hung`);
 }
 
 async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
@@ -260,6 +295,13 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
   // --- knowledge repo (optional) -----------------------------------------------
   if (opts.repoRoot) {
+    // Probed before opening the coordinator, which may itself wait for this lock.
+    let lockCheck: DoctorCheck | null = null;
+    try {
+      lockCheck = worktreeLockCheck(repoPaths(opts.repoRoot, loadConfig(opts.repoRoot).repoId).runtimeDir);
+    } catch {
+      // not a loadable repo: the coordinator open below reports it
+    }
     try {
       const coord = await openCoordinator(opts.repoRoot);
       try {
@@ -286,6 +328,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
     } catch (e) {
       add("repo", "fail", `${opts.repoRoot}: ${errorMessage(e)}`, false);
     }
+    if (lockCheck) checks.push(lockCheck);
   } else {
     add("repo", "info", "not inside a knowledge repo (pass --repo <dir> or cd into one)", false);
   }
