@@ -69,6 +69,13 @@ T3.6 and T3.7.
 - BrainKit must decode a message's `id` as an optional string. A line the
   server can't attribute to a request gets an error with `"id": null`
   (protocol §2; transcript `test/rpc/transcripts/framing.jsonl`).
+- Decoding notes from T1.4:
+  - `Outlink.targetNoteId` is `null` for a dangling link.
+  - `RepoStatus.queue` always has all nine `MutationState` keys.
+  - To page back through a conversation, call `conversation.get` with
+    `beforeTurnId = turns[0].turnId` until `hasMore` is false.
+  - `notes.get` can briefly return `UNKNOWN_NOTE` while the index catches
+    up. Refetch on the next `repo.changed`.
 - Transcript headers may carry `tmp` and `modelScript`, which are Bun-only.
   The Swift replay ignores them and skips `test` lines (protocol §9).
 - One `runtime/locks/turn-<sessionId>.sqlite` file per session accumulates
