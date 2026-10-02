@@ -26,6 +26,8 @@ const PROVIDER_VARS = [
   "BRAIN_EMBEDDING_MODEL",
   "BRAIN_EMBEDDING_DIMS",
   "BRAIN_MODEL_MOCK",
+  "BRAIN_MODEL_SCRIPT",
+  "BRAIN_MODEL_SCRIPT_LOG",
 ];
 function cleanEnv(brainHome: string, extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = { ...(process.env as Record<string, string>), BRAIN_HOME: brainHome };

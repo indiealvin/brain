@@ -420,6 +420,7 @@ describe("brain chat (CLI)", () => {
   function run(args: string[], extraEnv: Record<string, string> = {}): { code: number; out: string; err: string } {
     const envVars: Record<string, string> = { ...(process.env as Record<string, string>), BRAIN_HOME: home, ...extraEnv };
     delete envVars["ANTHROPIC_API_KEY"]; // the mock must not need credentials
+    delete envVars["BRAIN_MODEL_SCRIPT"]; // it would win over BRAIN_MODEL_MOCK
     const r = Bun.spawnSync(["bun", CLI, ...args], { cwd: repo, env: envVars, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
   }
