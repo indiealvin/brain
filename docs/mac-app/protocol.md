@@ -51,7 +51,7 @@ The protocol does not depend on stdio. A later `runtime/rpc.sock` transport
   events of different requests.
 - Requests are handled concurrently. Within this server, coordinator
   operations run one at a time, in the order they are invoked
-  (`src/core/coordinator.ts:49`). Across processes, CR-1 guarantees mutual
+  (`src/core/coordinator.ts:109`). Across processes, CR-1 guarantees mutual
   exclusion only, not any order. The protocol guarantees no ordering
   between different requests. A `conversation.send` never calls the coordinator
   itself. Its knowledge run reaches the coordinator later, from a backlog
@@ -88,10 +88,10 @@ returns `NOT_INITIALIZED`.
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `repo.init` | `{path}` | `{path, repoId, createdConfig, createdRepo, written, commitSha}` | `initKnowledgeRepo`, `src/markdown/repo.ts:169`; same data as `cmdInit`, `src/cli.ts:249` |
-| `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:119`. `env` is merged as in `initialize` |
+| `repo.init` | `{path}` | `{path, repoId, createdConfig, createdRepo, written, commitSha}` | `initKnowledgeRepo`, `src/markdown/repo.ts:169`; same data as `brain init` (`initRepo`, `src/commands/repo.ts:96`) |
+| `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:293`. `env` is merged as in `initialize` |
 | `shutdown` | `{}` | `{}` | below |
-| `cancel` | `{target}` | `{cancelled}` | below. This is useful for a first-run `doctor.run`: its live checks can take up to 15 s each (`src/config/doctor.ts:122`), and with `repoPath` it waits for the worktree lock |
+| `cancel` | `{target}` | `{cancelled}` | below. This is useful for a first-run `doctor.run`: its live checks can take up to 15 s each (`src/config/doctor.ts:296`). Before T0.4, with `repoPath`, it also waited for the worktree lock |
 
 None of these needs an initialized server, so first run stays inside one
 protocol and one service layer. The alternative was one-shot
@@ -135,14 +135,15 @@ interface EngineInfo {
 
 `ProviderEnvKey` is the allowlist of variables the providers read:
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
-`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (`src/model/index.ts:63,104`),
+`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (`src/model/index.ts:77,126`),
 `BRAIN_MODEL_PROVIDER`, `BRAIN_MODEL`, `BRAIN_EFFORT`, `BRAIN_EMBEDDINGS`,
 `BRAIN_EMBEDDING_MODEL`, `BRAIN_EMBEDDING_DIMS`. The three `ANTHROPIC_*`
-keys reach the Anthropic provider only once CR-11 is in place
-(`design.md` §10). Until then that provider reads them from `process.env`.
+keys reach the Anthropic provider since CR-11 (T0.9, `design.md` §10,
+`src/model/index.ts:92–94`). Before T0.9 that provider read them from
+`process.env`.
 
 The server builds a private env and passes it to `createModelProvider(env)`
-and `createEmbeddingProvider(env)` (`src/model/index.ts:51,92`):
+and `createEmbeddingProvider(env)` (`src/model/index.ts:65,114`):
 
 ```ts
 applyUserConfigToEnv(loadUserConfig(), { ...process.env, ...params.env })
@@ -150,20 +151,22 @@ applyUserConfigToEnv(loadUserConfig(), { ...process.env, ...params.env })
 
 Precedence is the same as the CLI's: explicit values win, and `config.toml`
 fills only the unset keys (`src/config/userConfig.ts:159`). Unlike the CLI
-(`src/cli.ts:994`), the RPC entry point never projects `config.toml` or
+(`src/cli.ts:986`), the RPC entry point never projects `config.toml` or
 `params.env` onto `process.env` (`design.md` §10). The `NO_MODEL` check
-runs `hasModelCredentials` on this private env (`src/cli.ts:549`). Values
+runs `hasModelCredentials` on this private env
+(`src/commands/providers.ts:24`). Values
 are redacted in every log line. `env` is fixed for the life of the server.
 To change it, the client restarts the server.
 
-`initialize` runs the same open sequence as `openRepo` (`src/cli.ts:204`),
-through the service layer (CR-2): `recover()`, fast-forward the agent
-branch when nothing is pending, then reconcile the index. Under CR-1 this
-sequence is safe while other `brain` processes are running. The server then
+`initialize` runs the same open sequence as `openRepo`
+(`src/commands/repo.ts:63`), through the service layer (CR-2): `recover()`,
+fast-forward the agent branch when nothing is pending, then reconcile the
+index. Under CR-1 this sequence is safe while other `brain` processes are
+running. The server then
 try-locks the loop-owner lock (CR-10, `design.md` §5.3 item 2):
 
 - If it gets the lock, `loopOwner` is `"self"`, and the server runs the
-  Human Sync watcher and `watchTick` (`src/cli/watch.ts:89`) in process.
+  Human Sync watcher and `watchTick` (`src/cli/watch.ts:94`) in process.
 - If not, `loopOwner` is `"other"`, and the server tries again every
   `intervalMs`. When it gets the lock, for example because `brain watch`
   exited or was killed, it starts the loop and emits `engine.loopOwner`.
@@ -180,7 +183,7 @@ second `initialize`), `INTERNAL`.
 1. Stop accepting requests. Any request that arrives later gets
    `SHUTTING_DOWN`.
 2. Stop scheduling loop ticks and polls, and wait for the tick in flight
-   (as `brain watch` does, `src/cli.ts:539`).
+   (as `brain watch` does, `src/cli.ts:516`).
 3. Wait for the **underlying work** of every request to finish. A
    terminal message is not enough. A cancelled request has already sent
    `CANCELLED`, but its model call and turn storage continue (§3
@@ -226,20 +229,20 @@ knowledge run still happens.
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `repo.status` | `{}` | `RepoStatus` | `cmdStatus` data, `src/cli.ts:286` |
-| `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:119`. Same method as before `initialize`; `repoPath` defaults to the initialized repo |
+| `repo.status` | `{}` | `RepoStatus` | `repoStatus` data, `src/commands/repo.ts:153` |
+| `doctor.run` | `{repoPath?, offline?, env?}` | `DoctorReport` | `runDoctor`, `src/config/doctor.ts:293`. Same method as before `initialize`; `repoPath` defaults to the initialized repo |
 | `repo.pendingIntegration` | `{}` | `{mainHead, agentHead, paths: string[]}` | new, CR-4: paths that differ between `main` and agent HEAD (`design.md` §8) |
 | `engine.status` | `{}` | `EngineInfo & {lastTick?: EngineTick}` | RPC |
-| `engine.tick` | `{}` | `EngineTick` | `watchTick(…, {force: true})`, `src/cli/watch.ts:89`. Allowed whatever the loop owner (safe under CR-1). |
+| `engine.tick` | `{}` | `EngineTick` | `watchTick(…, {force: true})`, `src/cli/watch.ts:94`. Allowed whatever the loop owner (safe under CR-1). |
 
 ### Conversation
 
 | Method | Params | Events | Result | Source |
 |---|---|---|---|---|
-| `conversation.list` | `{}` | — | `SessionSummary[]` | `src/conversation/store.ts:32` |
+| `conversation.list` | `{}` | — | `SessionSummary[]` | `src/conversation/store.ts:43` |
 | `conversation.create` | `{}` | — | `{sessionId}` | `ConversationStore.createSession` |
 | `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order. `hasMore` is true when older turns exist | `getStoredTurns` (CR-8), paged by `conversationTurns`, `src/commands/conversation.ts` |
-| `conversation.send` | `{sessionId, text}` | `reply.delta {text}` | `{turn: TurnDTO, assistantTurn: TurnDTO, contextNotes: ContextNote[]}` | `runTurn`, `src/pipeline/session.ts:88` |
+| `conversation.send` | `{sessionId, text}` | `reply.delta {text}` | `{turn: TurnDTO, assistantTurn: TurnDTO, contextNotes: ContextNote[]}` | `runTurn`, `src/pipeline/session.ts:96` |
 | `capture.submit` | `{text}` | — | `{sessionId, turn: TurnDTO}` | new, CR-5. The capture joins the current day's capture session, which is created on first use (`design.md` §14.5). `sessionId` in the result names it |
 | `knowledge.backlog` | `{sessionId?}` | — | `SessionBacklog[]` (sessions whose backlog is not empty, or just the given session) | new, CR-5; `design.md` §5.5 item 7 |
 | `knowledge.runs` | `{sessionId?, limit?=50, cursor?: string}` | — | `{runs: KnowledgeRun[], nextCursor?: string}`, newest first. `cursor` is an opaque value copied from a previous `nextCursor`, and `nextCursor` is absent on the last page | new, CR-5 |
@@ -254,7 +257,7 @@ sees only `repo.changed`. A deferred run, for example while the provider
 is unreachable, sends `knowledge.event` with `event.type = "deferred"` and
 runs again later. The other option, keeping the request
 open until knowledge finishes, is rejected. It would misrepresent the
-pipeline (`src/pipeline/session.ts:99`) and block the UI's "request done"
+pipeline (`src/pipeline/session.ts:112`) and block the UI's "request done"
 state on background work.
 
 `capture.submit` returns once the user turn is durably appended. It makes
@@ -264,9 +267,10 @@ later, and it is retried once a model is available, using the F3 marker
 Its `knowledge.event` notifications are keyed by the captured turn, the
 same way as for `conversation.send`.
 
-Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:90`), `SESSION_BUSY`
+Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:98`), `SESSION_BUSY`
 (§2), `NO_MODEL`
-(`src/cli.ts:558`), `MODEL_ERROR` (provider error message, redacted).
+(`src/commands/providers.ts:53`), `MODEL_ERROR` (provider error message,
+redacted).
 `conversation.get` with a `beforeTurnId` that is not a turn of the session
 returns `INVALID_PARAMS` (`data: {sessionId, beforeTurnId}`). Turns are
 never removed, so a client that pages with ids it was given never gets this
@@ -276,8 +280,8 @@ error.
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `notes.search` | `{query, limit?=10}` | `{hits: SearchHit[]}` | `hybridSearch` + `noteById`, `src/cli.ts:371` |
-| `notes.list` | `{offset?=0, limit?=200}` | `{notes: NoteRow[], total}` | `allNotes`, `src/index/queries.ts:56` |
+| `notes.search` | `{query, limit?=10}` | `{hits: SearchHit[]}` | `hybridSearch` + `noteById`, `src/commands/notes.ts:40–43` |
+| `notes.list` | `{offset?=0, limit?=200}` | `{notes: NoteRow[], total}` | `notesPage` + `noteCount`, `src/index/queries.ts:61,66` |
 | `notes.get` | `{noteId}` | `NoteDetail` | index + `showFile(agentWorktree, agentHead, path)` |
 
 `notes.get` always reads at agent HEAD (I-23, `design.md` §8). It never
@@ -289,25 +293,25 @@ there. The client refetches on the next `repo.changed`.
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `proposals.list` | `{status?: ProposalStatus}` | `ProposalSummary[]` | `listProposals` (refreshes staleness), `src/core/coordinator.ts:261` |
+| `proposals.list` | `{status?: ProposalStatus}` | `ProposalSummary[]` | `listProposals` (refreshes staleness), `src/core/coordinator.ts:416` |
 | `proposals.get` | `{proposalId}` | `{proposal: Proposal, diff: FileDiff[]}` | Refreshes staleness, then computes the diff (CR-4), both in one CR-1 lock section. This makes the reachability argument below hold |
-| `proposals.accept` | `{proposalId}` | `ExecutionResult` | `acceptProposal`, `src/core/coordinator.ts:275` |
-| `proposals.reject` | `{proposalId, note?}` | `{proposalId, status: "REJECTED"}` | `rejectProposal`, with the compare-and-set of CR-1 (`design.md` §5.2). The PENDING check that is in `src/cli.ts:440` today moves into core |
-| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:155`). The service layer filters, reverses to newest first, and applies the limit. An empty `states` matches nothing |
+| `proposals.accept` | `{proposalId}` | `ExecutionResult` | `acceptProposal`, `src/core/coordinator.ts:438` |
+| `proposals.reject` | `{proposalId, note?}` | `{proposalId, status: "REJECTED"}` | `rejectProposal`, `src/core/coordinator.ts:486`, with the compare-and-set of CR-1 (`design.md` §5.2). The PENDING check that was in `src/cli.ts:440` at `74d1445` moved into core (T0.5) |
+| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:165`). The service layer filters, reverses to newest first, and applies the limit. An empty `states` matches nothing |
 
 When the proposal cannot apply, `proposals.accept` returns
 `state: "REPLAN"`. If the proposal was already stale, `error` is `"STALE"`
-(`src/core/coordinator.ts:284`). If it became stale during execution,
+(`src/core/coordinator.ts:447`). If it became stale during execution,
 `error` is the executor's `"PRECONDITION_FAILED: …"`
-(`src/core/executor.ts:236`) and the proposal is now `STALE`
-(`src/core/coordinator.ts:299`). Either way this is a normal `result`, not
+(`src/core/executor.ts:252`) and the proposal is now `STALE`
+(`src/core/coordinator.ts:467–469`). Either way this is a normal `result`, not
 an `error` message. The client keys on `state === "REPLAN"`, re-fetches the
 proposal, and shows that the note changed since the proposal was made.
 
 Errors: `UNKNOWN_PROPOSAL` for `get`, `accept` and `reject`, and
 `PROPOSAL_NOT_PENDING` for `reject` only. `accept` on a proposal that is
 not PENDING (including ACCEPTED and REJECTED) returns the core result
-unchanged: `REPLAN` / `"STALE"` (`src/core/coordinator.ts:283`).
+unchanged: `REPLAN` / `"STALE"` (`src/core/coordinator.ts:446`).
 
 Under CR-1, the PENDING check and the decision are one compare-and-set in
 core, under the shared lock (`design.md` §5.2). Concurrent accept and
@@ -319,7 +323,7 @@ decision. The loser gets `PROPOSAL_NOT_PENDING` (reject) or `REPLAN` /
 
 | Method | Params | Result | Source |
 |---|---|---|---|
-| `history.list` | `{path?, limit?=50, before?: sha}` | `HistoryEntry[]` | new, CR-4: `git log main` + `parseTrailers`, `src/git/git.ts:231` |
+| `history.list` | `{path?, limit?=50, before?: sha}` | `HistoryEntry[]` | new, CR-4: `git log main` + `parseTrailers`, `src/git/git.ts:244` |
 | `history.diff` | `{sha, path?}` | `FileDiff[]` | new, CR-4 |
 
 `history.list` reads `main` (what the user owns). Pending agent commits
@@ -336,7 +340,7 @@ method in v1 (`design.md` §14.1).
 | `engine.loopOwner` | `EngineInfo` | This server acquired the loop-owner lock and started its loop (`design.md` §5.3 item 2). It never loses the lock while running, so there is no reverse transition |
 | `engine.tick` | `EngineTick` | Only when `loopOwner: "self"`: after ticks where `changed` is true, or where drained results include a state other than `INTEGRATED` |
 | `engine.humanSync` | `{sha}` | Only when `loopOwner: "self"`: Human Sync committed quiescent edits (`SyncResult.committed`, `src/core/types.ts:298`) |
-| `engine.error` | `{message}` | The loop caught an error (`src/cli.ts:522`). Informational only |
+| `engine.error` | `{message}` | The loop caught an error (`src/cli.ts:503`). Informational only |
 
 ```ts
 interface RepoChanged {
@@ -412,7 +416,7 @@ Rules:
   Swift decoder gives every enum an `unknown(String)` case.
 - IDs are opaque strings: `mut_<ULID>`, `prop_<ULID>`
   (`src/core/ids.ts:77`), session ULIDs, zero-padded turn ids
-  (`src/conversation/store.ts:52`). Clients never parse them.
+  (`src/conversation/store.ts:70`). Clients never parse them.
 - Timestamps are ISO-8601 strings as stored. Frontmatter `created` is
   `YYYY-MM-DD` (`src/core/types.ts:46`).
 - SHAs are full hex. The client shortens them for display.
@@ -428,9 +432,9 @@ Rules:
 | `MutationState` | `QUEUED RUNNING COMMITTED INTEGRATED NOOP REPLAN BLOCKED FAILED_INVALID_EXECUTION FAILED` | 144 |
 | `ProposalStatus` | `PENDING ACCEPTED REJECTED STALE` | 192 |
 | `TurnRole` | `user assistant` | 219 |
-| `CommitTrailers.actor` | `agent human-sync human` (a missing trailer parses as `human`, `src/git/git.ts:249`) | 184 |
+| `CommitTrailers.actor` | `agent human-sync human` (a missing trailer parses as `human`, `src/git/git.ts:262–264`) | 184 |
 | `IntegrationResult.status` | `integrated refused-dirty nothing-to-integrate rebuilt-and-integrated` | 305 |
-| `CheckStatus` | `ok fail warn skip info` (`src/config/doctor.ts:31`) | — |
+| `CheckStatus` | `ok fail warn skip info` (`src/config/doctor.ts:51`) | — |
 
 Display guidance, which is not semantics: `NOOP` means "nothing to change"
 and is never shown as a failure (I-3). `REPLAN` means "outdated, will be
@@ -449,16 +453,16 @@ re-planned". `BLOCKED` means "waiting on an outdated change".
 - `ExtractionCandidate`, carried by the `planned` and `error` knowledge
   events: `src/core/types.ts:234`
 - `ContextNote`: `src/pipeline/chat.ts:21`
-- `SessionSummary`: `src/conversation/store.ts:32`
+- `SessionSummary`: `src/conversation/store.ts:43`
 - `NoteRow`: `src/index/queries.ts:11`
 - `Backlink`, `Outlink`: `src/index/backlinks.ts:7,13`
-- `DoctorReport`, `DoctorCheck`: `src/config/doctor.ts:33,41`
+- `DoctorReport`, `DoctorCheck`: `src/config/doctor.ts:53,61`
 
 ### RPC-only shapes (`src/rpc/dto.ts`)
 
 ```ts
 // ConversationTurn (src/core/types.ts:221) plus the timestamp the store already
-// writes (TurnLine.at, src/conversation/store.ts:29). types.ts is not changed.
+// writes (TurnLine.at, src/conversation/store.ts:34). types.ts is not changed.
 interface TurnDTO {
   sessionId: string; turnId: string; role: TurnRole; text: string; at: string;
   knowledge?: KnowledgeTurnState;    // user turns only; derived by core (design.md §5.5)
@@ -495,20 +499,20 @@ interface KnowledgeRun {
   errors: string[];                  // KnowledgeUpdate.errors, src/pipeline/knowledge.ts:54
 }
 
-// cmdStatus data, src/cli.ts:286
+// RepoStatus, src/commands/repo.ts:119 (returned by repoStatus)
 interface RepoStatus {
   repo: string; repoId: string; stateDir: string;
   mainHead: string; agentHead: string; indexedCommit: string | null;
   queue: Record<MutationState, number>; pendingProposals: number;
 }
 
-// hybridSearch hit + index row, src/cli.ts:372; HybridSignals src/retrieval/hybrid.ts:38
+// hybridSearch hit + index row, src/commands/notes.ts:41–43; HybridSignals src/retrieval/hybrid.ts:38
 interface SearchHit { noteId: string; score: number; title: string; path: string;
   signals: { lexical?: number; semantic?: number; graph?: number } }
 
 interface NoteDetail {
   note: NoteRow;
-  aliases: string[];                 // aliasesOfNote, src/index/queries.ts:61
+  aliases: string[];                 // aliasesOfNote, src/index/queries.ts:71
   raw: string;                       // file at agent HEAD
   atCommit: string;                  // agent HEAD sha used for `raw`
   backlinks: Backlink[];
@@ -516,7 +520,7 @@ interface NoteDetail {
   pendingIntegration: boolean;       // path changed between main and agent HEAD
 }
 
-// watchTick result, src/cli/watch.ts:75
+// watchTick result, src/cli/watch.ts:80
 interface EngineTick { drained: ExecutionResult[]; integration: IntegrationResult;
   changed: boolean; embedded: number }
 

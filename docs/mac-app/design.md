@@ -69,7 +69,7 @@ decisions back as RPC calls. Concretely:
 
 - Swift never re-derives a fact that core decides. Proposal staleness comes
   from `proposals.list`, which refreshes staleness in core
-  (`src/core/coordinator.ts:261`). The app never compares hashes.
+  (`src/core/coordinator.ts:416`). The app never compares hashes.
 - Every Swift enum decoder has an `unknown(String)` case, so a
   `MutationState` added in TypeScript never crashes the app.
 - CLI and RPC are thin adapters over one service layer extracted from
@@ -83,7 +83,7 @@ around them.
 
 | Surface | Core source | Notes |
 |---|---|---|
-| Conversation (Chat) | `runTurn`, `src/pipeline/session.ts:88` | The reply streams. "Knowledge updated · …" arrives later as a notification (§6). Sessions come from `ConversationStore.listSessions`. |
+| Conversation (Chat) | `runTurn`, `src/pipeline/session.ts:96` | The reply streams. "Knowledge updated · …" arrives later as a notification (§6). Sessions come from `ConversationStore.listSessions`. |
 | Search | `hybridSearch`, `src/retrieval/hybrid.ts:85` | Shows the same lexical, semantic and graph signals that `brain search` prints. |
 | Note (Knowledge Browser) | index `notes`; `backlinks` / `outlinks`, `src/index/backlinks.ts` | Read-only view at agent HEAD (§8). "Open in external editor" opens the file in the user worktree. |
 | Changes (Activity + History) | queue rows; Git log + trailers | Activity shows live `MutationState`s. History lists commits with their `Actor` and `Mutation-ID` trailers (`docs/spec.md` §54) and shows a diff for each. |
@@ -100,30 +100,35 @@ change" action outside the Proposal Inbox.
 
 ## 5. Process model and the single writer
 
-### 5.1 The current gap
+### 5.1 The gap before CR-1
 
-`docs/spec.md` §12 says execution runs "under the coordinator's
-single-writer lock". I-11 says Human Sync and integration share one
-file-based `RepoWorktreeLock`. In the code, the single writer is only
+This section describes the code before CR-1 (T0.3–T0.6). Citations of code
+that CR-1 removed or changed point at commit `74d1445`.
+
+`docs/spec.md` §12 said execution runs "under the coordinator's
+single-writer lock". I-11 said Human Sync and integration share one
+file-based `RepoWorktreeLock`. In the code, the single writer was only
 enforced inside one process:
 
-- `Serial` (`src/core/coordinator.ts:49`) is an in-process mutex.
-- The file lock (`src/sync/lock.ts:95`) is taken only by Human Sync
-  (`src/core/coordinator.ts:197`), integration
-  (`src/core/integrate.ts:52`), rebuild (`src/core/coordinator.ts:78`), and
-  the agent fast-forward in `openRepo` (`src/cli.ts:213`).
-  `executeMutation` writes into the agent worktree without it.
-- `openCoordinator` runs `ensureAgentWorktree`
-  (`src/core/coordinator.ts:333`) before taking any lock. That function can
-  `checkout`, `rm -rf` or `reset --hard` the agent worktree
-  (`src/git/worktree.ts:58`). `recover()` then resets a dirty agent worktree
-  and re-executes `RUNNING` rows (`src/core/coordinator.ts:202`). Neither
-  step checks whether another process is in the middle of executing.
-- Every CLI command opens through `openRepo` (`src/cli.ts:204`), so every
-  command runs this sequence.
+- `Serial` (`src/core/coordinator.ts:109`) is an in-process mutex.
+- The file lock (`src/sync/lock.ts:369`) was taken only by Human Sync
+  (`src/core/coordinator.ts:282`), integration
+  (`src/core/integrate.ts:52` at `74d1445`), rebuild
+  (`src/core/coordinator.ts:78` at `74d1445`), and the agent fast-forward
+  in `openRepo` (`src/commands/repo.ts:72`).
+  `executeMutation` wrote into the agent worktree without it.
+- `openCoordinator` ran `ensureAgentWorktree`
+  (`src/core/coordinator.ts:333` at `74d1445`) before taking any lock. That
+  function can `checkout`, `rm -rf` or `reset --hard` the agent worktree
+  (`src/git/worktree.ts:58`). `recover()` then reset a dirty agent worktree
+  and re-executed `RUNNING` rows (`src/core/coordinator.ts:202` at
+  `74d1445`). Neither step checked whether another process was in the
+  middle of executing.
+- Every CLI command opens through `openRepo` (`src/commands/repo.ts:63`), so
+  every command ran this sequence.
 
-Concrete failure, which exists today in the workflow the README documents
-(`brain watch` alongside `brain chat`):
+Concrete failure, which existed before CR-1 in the workflow the README
+documents (`brain watch` alongside `brain chat`):
 
 1. `brain watch` is executing mutation M and has written M's files into the
    agent worktree (spec §12 step 6).
@@ -132,7 +137,7 @@ Concrete failure, which exists today in the workflow the README documents
 3. The watcher's `git status` (step 7) is now empty, so M is recorded as
    `NOOP`. The mutation is lost silently.
 
-Other interleavings give `FAILED_INVALID_EXECUTION`, or a `RUNNING` row
+Other interleavings gave `FAILED_INVALID_EXECUTION`, or a `RUNNING` row
 executed twice. A long-lived app child next to a launchd `brain watch`
 would turn this narrow window into a standing risk.
 
@@ -148,29 +153,31 @@ and rejected in §15.
   - `integrate`, `rebuild`, `syncOnce`
   - `recover`, `reconcileIndex`
   - `acceptProposal`, `rejectProposal`, and `listProposals`, which writes
-    STALE marks (`src/core/coordinator.ts:253`)
+    STALE marks (`src/core/coordinator.ts:401`)
 
   Everything these methods call runs without taking the lock.
   `integrateOnce` and `rebuildUnlocked` stop acquiring it themselves.
-  Today's rule that the lock is "never nested"
-  (`src/core/coordinator.ts:5–9`) still holds.
+  The pre-CR-1 rule that the lock is "never nested"
+  (`src/core/coordinator.ts:5–9` at `74d1445`) still holds
+  (`src/core/coordinator.ts:11–15`).
 
   Two public writes stay outside the lock on purpose:
   - `submitProposal` is a single insert of a new id.
-  - `enqueue` (`src/core/coordinator.ts:232`) is a single insert in an
+  - `enqueue` (`src/core/coordinator.ts:375`) is a single insert in an
     immediate transaction (see the last bullet). It never touches a
     worktree, and no locked section depends on the set of QUEUED rows
     staying fixed while it runs. A `drainQueued` that starts after the
     insert runs the row; one that started before leaves it for the next
     drain.
-  `rejectProposal` currently takes neither the mutex nor the lock
-  (`src/core/coordinator.ts:309`). Both are in the list above to make that
-  explicit.
-- **Proposal decisions are compare-and-set.** Today `ProposalStore.decide`
-  has no from-status guard (`src/proposal/store.ts:121`), and the PENDING
-  check for reject lives in the CLI (`src/cli.ts:440`). So process A can
-  accept after process B checked PENDING, and B's REJECTED then overwrites
-  A's ACCEPTED. Under CR-1:
+  Before T0.4, `rejectProposal` took neither the mutex nor the lock
+  (`src/core/coordinator.ts:309` at `74d1445`). Both are in the list above
+  to make that explicit.
+- **Proposal decisions are compare-and-set.** Before T0.5,
+  `ProposalStore.decide` had no from-status guard
+  (`src/proposal/store.ts:121` at `74d1445`), and the PENDING check for
+  reject lived in the CLI (`src/cli.ts:440` at `74d1445`). So process A
+  could accept after process B checked PENDING, and B's REJECTED then
+  overwrote A's ACCEPTED. Under CR-1:
   - The check and the decision run in one critical section under the lock.
     The PENDING check moves into `rejectProposal`, so it is no longer an
     adapter concern.
@@ -190,13 +197,14 @@ and rejected in §15.
   the file lock. The fixture harness opens a coordinator and executes
   without calling `recover()` (`test/harness/index.ts:352`), so the call
   cannot move into `recover()`.
-- **The kernel releases the lock.** Today the lock is a pid file, and
-  reclaiming a stale one takes two separate steps: judge the file stale
-  (`src/sync/lock.ts:100`), then rename whatever is at that path (`:66`).
+- **The kernel releases the lock.** Before T0.3 the lock was a pid file,
+  and reclaiming a stale one took two separate steps: judge the file stale
+  (`src/sync/lock.ts:100` at `74d1445`), then rename whatever is at that
+  path (`:66`).
   Suppose two contenders both judge an old lock stale. A renames it, then
   acquires a new lock. B then renames **A's new lock** away and acquires
   too. Both are now inside the critical section. No staleness rule can fix
-  this. The 60 s age rule (`:18,56`) adds a second hazard: under CR-1,
+  this. The 60 s age rule (`:18,56`) added a second hazard: under CR-1,
   execute and integrate hold the lock through reconcile, which can take
   longer than 60 s, so a live holder would be evicted.
 
@@ -208,7 +216,7 @@ and rejected in §15.
     fixture 3.12 relies on.
   - **Every wait is asynchronous.** Each lock connection runs with
     `busy_timeout = 0`. A waiter retries on `SQLITE_BUSY` with the
-    existing async backoff (`src/sync/lock.ts:95–106`). `bun:sqlite` is
+    existing async backoff (`src/sync/lock.ts:312–326`). `bun:sqlite` is
     synchronous, so a non-zero `busy_timeout` would block the whole event
     loop. For the RPC server that would stall streaming, polling and every
     other request. The bounded wait of §5.4 is therefore a deadline on the
@@ -319,12 +327,12 @@ and rejected in §15.
     wait and the knowledge lock uses try-lock. So there is no cycle, and no
     wait is unbounded except behind a live holder.
 - **An accept completes after a crash.** `acceptProposal` writes
-  ACCEPTED to `proposals.sqlite` (`src/core/coordinator.ts:286`) and then
-  enqueues into `queue.sqlite` (`:297`). These are two databases with no
+  ACCEPTED to `proposals.sqlite` (`src/core/coordinator.ts:446`) and then
+  enqueues into `queue.sqlite` (`:465`). These are two databases with no
   shared transaction. A SIGKILL between the two writes leaves an ACCEPTED
-  proposal with no mutation. `recover()` never looks at proposals, and
-  accepting again returns `REPLAN` / `"STALE"`, so the user's decision is
-  silently lost.
+  proposal with no mutation. Before T0.6, `recover()` never looked at
+  proposals, and accepting again returns `REPLAN` / `"STALE"`, so the
+  user's decision was silently lost.
 
   The write order stays as it is. Enqueueing first would let a drain
   execute a mutation for a proposal the user can still reject.
@@ -332,9 +340,9 @@ and rejected in §15.
   CR-1 instead reconciles each ACCEPTED proposal with its queue row, by the
   proposal's stable `mutationId`:
   - **No row**: rebuild the same mutation that `acceptProposal` builds
-    (`:287–296`), with the same `mutationId`, `writes` and snapshot
+    (`:95–106`), with the same `mutationId`, `writes` and snapshot
     preconditions. Then enqueue it, execute it, and integrate it as
-    `acceptProposal` does (`:303`). Without the integrate step the change
+    `acceptProposal` does (`:472`). Without the integrate step the change
     would sit in `COMMITTED` until the next tick.
   - **Row in `REPLAN`**: mark the proposal STALE (ACCEPTED → STALE). This
     also covers a crash after enqueue but before execution, where a later
@@ -342,17 +350,18 @@ and rejected in §15.
   - **Any other state**: nothing to do.
 
   `enqueue` is already a no-op for an id that exists
-  (`src/core/queue.ts:108`), so the step is idempotent. It runs under the
+  (`src/core/queue.ts:109`), so the step is idempotent. It runs under the
   lock as part of recovery (next bullet). The `REPLAN` → STALE check also
   runs in every `listProposals` staleness refresh. This adds a step to
   `docs/spec.md` §17.
-- **Recovery runs continuously, not only at startup.** Today `recover()`
-  runs once, when a process opens the repo (`src/cli.ts:212`).
-  `drainQueued` executes only `QUEUED` rows (`src/core/coordinator.ts:179`),
-  and rebuild considers only `COMMITTED` ones (`src/core/rebuild.ts:59`).
+- **Recovery runs continuously, not only at startup.** Before T0.6,
+  `recover()` ran once, when a process opened the repo
+  (`src/commands/repo.ts:71`). `drainQueued` executed only `QUEUED` rows
+  (`src/core/coordinator.ts:179` at `74d1445`), and rebuild considers only
+  `COMMITTED` ones (`src/core/rebuild.ts:59`).
   So a `RUNNING` row left by another process that crashed, a dirty agent
   worktree, or an ACCEPTED proposal with no queue row would wait until some
-  process restarts. A long-lived child might never do that, and Activity
+  process restarted. A long-lived child might never do that, and Activity
   would show `RUNNING` forever.
 
   CR-1 makes continuous recovery safe. Execution holds the worktree lock
@@ -366,7 +375,7 @@ and rejected in §15.
   - The accept reconciliation above.
 
   In addition, a process that acquires the loop-owner lock (CR-10) runs a
-  forced tick at once, as `brain watch` does at startup (`src/cli.ts:528`).
+  forced tick at once, as `brain watch` does at startup (`src/cli.ts:511`).
   This extends spec §17 and I-12 from "at startup" to "at startup and at
   the start of every drain", and it is part of CR-1's sign-off.
 
@@ -379,14 +388,14 @@ and rejected in §15.
 
   The "row in `REPLAN`" case of the accept reconciliation also covers an
   accepted mutation that reached `COMMITTED` but was invalidated at
-  rebuild because `main` moved before integration. Today such a proposal
-  stays ACCEPTED while its change is lost. Marking it STALE extends spec
-  §34, which covers only "validation fails at execution". That extension is
-  also part of CR-1's sign-off.
-- `Queue.enqueue` uses an immediate transaction. Today it uses a deferred
-  transaction, reads `MAX(seq)`, then inserts
-  (`src/core/queue.ts:110–114`). In WAL mode, a second process can make
-  that write fail when the transaction upgrades to a write lock.
+  rebuild because `main` moved before integration. Before T0.6 such a
+  proposal stayed ACCEPTED while its change was lost. Marking it STALE
+  extends spec §34, which before O1 covered only "validation fails at
+  execution". That extension is also part of CR-1's sign-off.
+- `Queue.enqueue` uses an immediate transaction. Before T0.4 it used a
+  deferred transaction, read `MAX(seq)`, then inserted
+  (`src/core/queue.ts:110–114` at `74d1445`). In WAL mode, a second process
+  could make that write fail when the transaction upgrades to a write lock.
 
 Acceptance: start `brain watch --interval 50`, and at the same time run two
 `brain chat --once` processes whose turns produce mutations (using the
@@ -421,7 +430,7 @@ used only in tests is acceptable.
 1. The app spawns the bundled `brain rpc --stdio`, one child per repo.
 2. **Loop ownership (CR-10).** A per-repo **loop-owner lock** decides who
    runs the loop: the Human Sync watcher plus `watchTick`
-   (`src/cli/watch.ts:89`). It uses the CR-1 primitive, so the kernel
+   (`src/cli/watch.ts:94`). It uses the CR-1 primitive, so the kernel
    releases it when its holder dies.
    - `brain watch` acquires it at startup and holds it for its lifetime.
      While another process holds it, `brain watch` waits and logs who
@@ -435,14 +444,14 @@ used only in tests is acceptable.
      the child takes over within one interval.
 
    Two more changes follow. `brain watch` writes `watch.pid` only after it
-   acquires the lock; today it writes the file right after opening the repo
-   (`src/cli.ts:492–495`). `brain doctor` reports loop ownership from the
-   lock's side file rather than from `watch.pid`
-   (`src/config/doctor.ts:275–283`), so a waiting `brain watch` is not
-   reported as "running".
+   acquires the lock; before T0.8 it wrote the file right after opening the
+   repo (`src/cli.ts:492–495` at `74d1445`). `brain doctor` reports loop
+   ownership from the lock's side file (`src/config/doctor.ts:171–183`)
+   rather than from `watch.pid` (`src/config/doctor.ts:275–283` at
+   `74d1445`), so a waiting `brain watch` is not reported as "running".
 
-   The `watch.pid` file (`src/config/doctor.ts:29`) is not used for this
-   decision. It is removed only on a clean stop (`src/cli.ts:541`), so after
+   The `watch.pid` file (`src/config/doctor.ts:45`) is not used for this
+   decision. It is removed only on a clean stop (`src/cli.ts:520`), so after
    a crash a reused pid would look like a live daemon. Holder details (kind
    and pid) go into an informational side file, the same way as for the
    CR-1 lock.
@@ -495,20 +504,20 @@ loop belongs to the daemon. Only the transport changes.
 
 ### 5.4 Conversation sessions (CR-9)
 
-CR-1 covers the knowledge repo, not the conversation store. The store has
-two gaps of its own:
+CR-1 covers the knowledge repo, not the conversation store. Before T0.7 the
+store had two gaps of its own:
 
 - **Turn ordering within a process.** `runTurn` appends the user turn,
   awaits the reply, then appends the assistant turn
-  (`src/pipeline/session.ts:92–96`). Only knowledge runs are chained per
-  session (`:60–75`). Two concurrent sends to one session can therefore
-  store `user₁ user₂ assistant₂ assistant₁`.
-- **Turn ids across processes.** `appendTurn` numbers turns from a
-  per-instance cached count (`src/conversation/store.ts:59,120–125`). The
-  app and a `brain chat --session <id>` in a terminal can hand out the same
-  `turnId`, so one `conversation://<session>/<turn>` URI would name two
-  turns. Grounding provenance depends on those URIs being unambiguous
-  (I-16, I-18, `docs/spec.md` §27).
+  (`src/pipeline/session.ts:102–106`). Before T0.7 only knowledge runs were
+  chained per session (`:68–83`). Two concurrent sends to one session could
+  therefore store `user₁ user₂ assistant₂ assistant₁`.
+- **Turn ids across processes.** `appendTurn` numbered turns from a
+  per-instance cached count (`src/conversation/store.ts:59,120–125` at
+  `74d1445`). The app and a `brain chat --session <id>` in a terminal could
+  hand out the same `turnId`, so one `conversation://<session>/<turn>` URI
+  would name two turns. Grounding provenance depends on those URIs being
+  unambiguous (I-16, I-18, `docs/spec.md` §27).
 
 Required:
 
@@ -549,8 +558,8 @@ Required:
 ### 5.5 Knowledge backlog (contract for CR-5)
 
 Today each turn's knowledge run is an in-memory promise, chained per
-session inside one process (`src/pipeline/session.ts:60–75`). Its input is
-whatever the session holds when the run starts (`store.getTurns`, `:100`).
+session inside one process (`src/pipeline/session.ts:68–83`). Its input is
+whatever the session holds when the run starts (`store.getTurns`, `:113`).
 Nothing durable records which turns have been processed, so a run lost to a
 crash, a forced quit, or an offline provider never happens. CR-5 makes the
 backlog durable, under this contract:
@@ -580,7 +589,7 @@ backlog durable, under this contract:
      check passes under the lock, *t* has no reply and never will.
      That happens for a capture, a reply that failed (`MODEL_ERROR`:
      `runTurn` appends the user turn and then throws,
-     `src/pipeline/session.ts:92–95`), or a writer that crashed.
+     `src/pipeline/session.ts:102–105`), or a writer that crashed.
 
    Queries follow the same rule without writing anything. To tell
    `awaiting-reply` from `pending` for a last turn, a query try-locks the
@@ -599,7 +608,7 @@ backlog durable, under this contract:
 
    **Behavior change:** a turn whose reply failed is now processed without
    a reply. Today its knowledge run never starts, because `runTurn` throws
-   before creating it (`src/pipeline/session.ts:95–99`). A user turn is
+   before creating it (`src/pipeline/session.ts:105–112`). A user turn is
    valid grounding with or without a reply (I-16).
 3. **One processor per session, strict order.** A process works on a
    session's backlog only while holding that session's **knowledge lock**.
@@ -610,7 +619,7 @@ backlog durable, under this contract:
 4. **Outcome and advancement.** Each run ends in one of two outcomes:
    - **Deferred.** The extraction step failed with a retryable provider
      error, or no model is configured. Both adapters throw
-     `ModelProviderError` with a `retryable` flag (`src/model/claude.ts:56`,
+     `ModelProviderError` with a `retryable` flag (`src/model/claude.ts:143`,
      `src/model/openrouter.ts:87,103`). Nothing from
      *t* reached the repo. The marker stays. The holder stops working on
      this session, releases the lock, and retries later with capped
@@ -672,12 +681,12 @@ backlog durable, under this contract:
      - Before it exits, it sweeps once more. If another process holds the
        session's knowledge lock, `chat` exits at once, and the holder
        processes the turns.
-     - `--wait` (`src/cli.ts:708–709`) instead waits until the marker has
+     - `--wait` (`src/cli.ts:685–686`) instead waits until the marker has
        passed its turn, whichever process ran it. It then prints that run's
        recorded summary (item 7). If the run was deferred, it prints the
        deferral reason and exits, leaving the turn in the backlog.
    - `brain watch` never runs knowledge. It has no model provider
-     (`src/cli.ts:499–508`).
+     (`src/cli.ts:461–463`).
 
    Test: block a reply (the scripted provider holds it), and let another
    process sweep the backlog. *t* must not be processed while the reply is
@@ -748,7 +757,7 @@ backlog durable, under this contract:
 ## 6. A turn as the app sees it
 
 `runTurn` resolves once the reply is stored. Knowledge maintenance is a
-separate promise, chained per session (`src/pipeline/session.ts:99`). The
+separate promise, chained per session (`src/pipeline/session.ts:112`). The
 protocol mirrors this:
 
 ```
@@ -774,7 +783,7 @@ The one-line summary is produced by core (`formatKnowledgeSummary`,
   `Proposal` type has no such field. The diff is therefore a core function,
   never a Swift computation.
 - Accept calls `proposals.accept`. Core catches up with main and re-checks
-  staleness against agent HEAD (`src/core/coordinator.ts:275`). If the
+  staleness against agent HEAD (`src/core/coordinator.ts:438`). If the
   result has `state: "REPLAN"`, core has already marked the proposal STALE.
   The app re-fetches it and says the note changed since the proposal was
   made (`protocol.md` §4).
@@ -823,28 +832,30 @@ The CLI keeps `~/.brain/config.toml` (mode 600). The app keeps keys in the
 macOS Keychain and passes them in `initialize` (`protocol.md` §3). Core
 builds its providers from a private environment. `createModelProvider(env)`
 and `createEmbeddingProvider(env)` already accept one
-(`src/model/index.ts:51,92`). That is enough for OpenRouter, whose key is
-read from `env` (`src/model/index.ts:54`).
+(`src/model/index.ts:65,114`). That is enough for OpenRouter, whose key is
+read from `env` (`src/model/index.ts:68`).
 
-It is **not** enough for Anthropic. That path builds
-`new ClaudeModelProvider({ model, effort })` (`src/model/index.ts:74`). Its
-options carry no credentials (`src/model/claude.ts:47–53`), and it calls
-`new Anthropic()` (`:102`), which reads `ANTHROPIC_API_KEY` from
-`process.env` (`:17–18`). CR-11 therefore has `ClaudeModelProvider` accept
-`apiKey`, `authToken` and `baseURL`, and has `createModelProvider` pass
-them from `env`. The pass-through is an **isolated** mode that the RPC
-server opts into, and it differs from the CLI path:
+Before T0.9 it was **not** enough for Anthropic. That path built
+`new ClaudeModelProvider({ model, effort })` (`src/model/index.ts:74` at
+`74d1445`). Its options carried no credentials (`src/model/claude.ts:47–53`
+at `74d1445`), and it called `new Anthropic()` (`:102`), which reads
+`ANTHROPIC_API_KEY` from `process.env` (`:17–18`). CR-11 therefore has
+`ClaudeModelProvider` accept `apiKey`, `authToken` and `baseURL`
+(`src/model/claude.ts:75–77`), and has `createModelProvider` pass them from
+`env` (`src/model/index.ts:92–94`). The pass-through is an **isolated**
+mode that the RPC server opts into, and it differs from the CLI path:
 
 - **Isolated mode.** Unset values are passed as `null` and the SDK's
   default credential chain is disabled, so nothing falls back to
   `process.env` or an `ant auth login` profile.
 - **CLI path.** It keeps today's behaviour, including the SDK's fallback.
 
-`src/config/doctor.ts:99–102` is *not* such an isolated example. Its
-`|| undefined` lets the SDK fall back to `process.env` when the private env
-has no key, so `doctor.run` with a private env must use the isolated mode
-too (T1.3). The `NO_MODEL` check must also run on the private env:
-`hasModelCredentials(env)` takes it as a parameter (`src/cli.ts:549`).
+Before T1.3, `src/config/doctor.ts:99–102` at `74d1445` was *not* such an
+isolated example. Its `|| undefined` let the SDK fall back to `process.env`
+when the private env had no key, so `doctor.run` with a private env must use
+the isolated mode too (T1.3, `src/config/doctor.ts:271–281`). The
+`NO_MODEL` check must also run on the private env: `hasModelCredentials(env)`
+takes it as a parameter (`src/commands/providers.ts:24`).
 
 Keys never go into `process.env`, because Git subprocesses inherit it
 (`src/git/git.ts:42`). They are never written to
@@ -855,7 +866,7 @@ provider, model or a key in Settings restarts the child: `shutdown`, spawn,
 then `initialize`. The protocol has no reconfigure method.
 
 The CLI currently projects `config.toml` onto `process.env`
-(`src/cli.ts:994`), so Git subprocesses, including hooks in the user's
+(`src/cli.ts:986`), so Git subprocesses, including hooks in the user's
 repo, inherit API keys today. The RPC entry point must not do the same.
 Fixing the CLI itself is outside this document's scope, but it is worth a
 follow-up.
@@ -897,7 +908,7 @@ resolved by keeping the existing core.
 | Authorship isolation | Two worktrees plus Human Sync (I-2, I-10–I-13), and no editor in the app |
 | SQLite canonicality | Derived state under `BRAIN_HOME` (I-23–I-25); queue and proposals live in separate DBs (`src/core/types.ts:273`) |
 | CREATE precondition | `{kind: "absent", slug}` (`src/core/types.ts:115`) |
-| Write-set strictness | A declared path left byte-identical is tolerated (I-3, `src/core/executor.ts:268`) |
+| Write-set strictness | A declared path left byte-identical is tolerated (I-3, `src/core/executor.ts:286`) |
 | Link namespace | Shared case-insensitive slug and alias namespace (I-21) |
 | `updated` frontmatter | Not introduced; required keys stay `id created type status` (`docs/design.md` §9) |
 | Read-set invalidation | Still a v0 non-goal (I-1); the client does not redefine it |
@@ -916,7 +927,7 @@ resolved by keeping the existing core.
 5. **Capture session — decided 2026-10-02: one capture session per day.**
    The first capture of a day creates a session marked as a capture session
    in its header. Today a session has no kind or metadata beyond its header
-   (`src/conversation/store.ts:18`). Every later capture that day joins
+   (`src/conversation/store.ts:23`). Every later capture that day joins
    that session. Captures therefore never hit `SESSION_BUSY` from a
    streaming reply (§5.4). The other options, the active conversation or
    one permanent capture session, were rejected. The day is the local
@@ -935,13 +946,13 @@ and `src/core/types.ts` are not edited by any item.
 | ID | Change | Sign-off |
 |---|---|---|
 | CR-1 | Cross-process single writer (§5.2): the kernel-released lock primitive with one file per lock and a fixed lock order, the lock taken once per write path, compare-and-set proposal decisions, accept crash recovery, and continuous recovery at the start of every drain. | **Yes — approved 2026-10-02.** It replaces the primitive in `src/sync/lock.ts` and rewrites its unit tests. It adds a step to `docs/spec.md` §17 and runs §17's recovery at every drain, not only at startup, which also changes I-12's "on startup" wording. It extends §34 so that a proposal also becomes STALE when its accepted mutation is invalidated at rebuild. Mixed `brain` versions sharing a `BRAIN_HOME` become unsupported. I-11 could also gain the words "and mutation execution / recovery" for clarity. |
-| CR-2 | Service layer extracted from `src/cli.ts`: the open sequence of `openRepo` plus command bodies. CLI and RPC both call it. `runDoctor` can reuse an open coordinator (`protocol.md` §3). The one visible CLI change: `brain status` reads its pending-proposal count without the lock, so the count is advisory, as in the protocol (`protocol.md` §5). The reject PENDING check (`src/cli.ts:440`) moves into core under CR-1 instead. | No, it is a pure refactor. |
+| CR-2 | Service layer extracted from `src/cli.ts`: the open sequence of `openRepo` plus command bodies. CLI and RPC both call it. `runDoctor` can reuse an open coordinator (`protocol.md` §3). The one visible CLI change: `brain status` reads its pending-proposal count without the lock, so the count is advisory, as in the protocol (`protocol.md` §5). The reject PENDING check (`src/cli.ts:440` at `74d1445`) moved into core under CR-1 instead (T0.5). | No, it is a pure refactor. |
 | CR-3 | RPC adapter `brain rpc --stdio` in `src/rpc/`, implementing `protocol.md`. | No. |
-| CR-4 | Diff and history functions: proposal diff, commit diff, `main` history with parsed trailers (`src/git/git.ts:231`), and the paths that differ between `main` and agent HEAD. | No. |
-| CR-5 | Durable knowledge backlog (§5.5) and the capture entry point (append a user turn, with no reply). It replaces the in-memory chain (`src/pipeline/session.ts:60–75`) and fixes each run's input range. It implements F3's tracking half. Sessions from before CR-5 get a baseline with no replay (§5.5 item 9). Using the marker to show the extractor which turns are context only is a follow-up. | **Yes — deferred by the owner (2026-10-02).** It changes how and when knowledge runs happen, and it makes running older `brain` binaries against the same `BRAIN_HOME` unsupported. The pipeline stages (`docs/spec.md` §36) stay the same. |
-| CR-6 | Scripted model provider for deterministic RPC transcripts, selected with `BRAIN_MODEL_SCRIPT=<file>` and built on `MockModelProvider`. The existing mock makes no knowledge extraction (`src/cli.ts:555`). | No; it is test only. |
+| CR-4 | Diff and history functions: proposal diff, commit diff, `main` history with parsed trailers (`src/git/git.ts:244`), and the paths that differ between `main` and agent HEAD. | No. |
+| CR-5 | Durable knowledge backlog (§5.5) and the capture entry point (append a user turn, with no reply). It replaces the in-memory chain (`src/pipeline/session.ts:68–83`) and fixes each run's input range. It implements F3's tracking half. Sessions from before CR-5 get a baseline with no replay (§5.5 item 9). Using the marker to show the extractor which turns are context only is a follow-up. | **Yes — deferred by the owner (2026-10-02).** It changes how and when knowledge runs happen, and it makes running older `brain` binaries against the same `BRAIN_HOME` unsupported. The pipeline stages (`docs/spec.md` §36) stay the same. |
+| CR-6 | Scripted model provider for deterministic RPC transcripts, selected with `BRAIN_MODEL_SCRIPT=<file>` and built on `MockModelProvider`. The existing mock makes no knowledge extraction (`src/commands/providers.ts:50`). | No; it is test only. |
 | CR-7 | Git version floor, decided from test results (§11). | **Yes — approved 2026-10-02: floor 2.39.** It changes README and `brain doctor`. |
-| CR-8 | Turn timestamps exposed at the store level (`TurnLine.at`, `src/conversation/store.ts:29`) without changing `ConversationTurn`. | No. |
+| CR-8 | Turn timestamps exposed at the store level (`TurnLine.at`, `src/conversation/store.ts:34`) without changing `ConversationTurn`. | No. |
 | CR-9 | Per-session cross-process turn lock, using the CR-1 primitive, and on-disk turn id allocation (§5.4). | No. It restores the uniqueness that provenance URIs already assume. |
 | CR-10 | Loop-owner lock (§5.3 item 2). `brain watch` holds it for its lifetime, and the RPC child runs its loop only while it holds it. `watch.pid` is written only after acquisition, and `brain doctor` reads the lock's side file. | **Yes — approved 2026-10-02.** `brain watch` now waits while another process owns the loop, instead of starting a second loop. |
 | CR-11 | `ClaudeModelProvider` accepts credentials and a base URL from the passed env; `NO_MODEL` checks the private env (§10). | No. This is an additive option, and CLI behavior is unchanged. |
