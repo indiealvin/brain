@@ -876,13 +876,14 @@ resolved by keeping the existing core.
    turn still completes and is stored (`protocol.md` §3).
 3. **Multi-repo.** v0.1 has one repo per window and one child per repo.
 4. **Socket transport.** See §5.3, upgrade path.
-5. **Capture session.** Captures could go to a dedicated capture session
-   (per day or permanent) or to the active conversation. Today a session has
-   no kind or metadata beyond its header (`src/conversation/store.ts:18`).
-   A dedicated session would need a header field. Capturing into the
-   active conversation would also hit `SESSION_BUSY` whenever a reply is
-   streaming (§5.4), which argues for a dedicated session. This is decided
-   together with CR-5.
+5. **Capture session — decided 2026-10-02: one capture session per day.**
+   The first capture of a day creates a session marked as a capture session
+   in its header. Today a session has no kind or metadata beyond its header
+   (`src/conversation/store.ts:18`). Every later capture that day joins
+   that session. Captures therefore never hit `SESSION_BUSY` from a
+   streaming reply (§5.4). The other options, the active conversation or
+   one permanent capture session, were rejected. The day is the local
+   calendar date. Implementing this is part of CR-5.
 6. **Re-processing history.** An explicit operation to move a session's
    marker backwards and re-extract, with a warning about duplicates
    (§5.5 item 9). It is not in v0.1.
@@ -896,16 +897,16 @@ and `src/core/types.ts` are not edited by any item.
 
 | ID | Change | Sign-off |
 |---|---|---|
-| CR-1 | Cross-process single writer (§5.2): the kernel-released lock primitive with one file per lock and a fixed lock order, the lock taken once per write path, compare-and-set proposal decisions, accept crash recovery, and continuous recovery at the start of every drain. | **Yes.** It replaces the primitive in `src/sync/lock.ts` and rewrites its unit tests. It adds a step to `docs/spec.md` §17 and runs §17's recovery at every drain, not only at startup, which also changes I-12's "on startup" wording. It extends §34 so that a proposal also becomes STALE when its accepted mutation is invalidated at rebuild. Mixed `brain` versions sharing a `BRAIN_HOME` become unsupported. I-11 could also gain the words "and mutation execution / recovery" for clarity. |
+| CR-1 | Cross-process single writer (§5.2): the kernel-released lock primitive with one file per lock and a fixed lock order, the lock taken once per write path, compare-and-set proposal decisions, accept crash recovery, and continuous recovery at the start of every drain. | **Yes — approved 2026-10-02.** It replaces the primitive in `src/sync/lock.ts` and rewrites its unit tests. It adds a step to `docs/spec.md` §17 and runs §17's recovery at every drain, not only at startup, which also changes I-12's "on startup" wording. It extends §34 so that a proposal also becomes STALE when its accepted mutation is invalidated at rebuild. Mixed `brain` versions sharing a `BRAIN_HOME` become unsupported. I-11 could also gain the words "and mutation execution / recovery" for clarity. |
 | CR-2 | Service layer extracted from `src/cli.ts`: the open sequence of `openRepo` plus command bodies. CLI and RPC both call it. `runDoctor` can reuse an open coordinator (`protocol.md` §3). The one visible CLI change: `brain status` reads its pending-proposal count without the lock, so the count is advisory, as in the protocol (`protocol.md` §5). The reject PENDING check (`src/cli.ts:440`) moves into core under CR-1 instead. | No, it is a pure refactor. |
 | CR-3 | RPC adapter `brain rpc --stdio` in `src/rpc/`, implementing `protocol.md`. | No. |
 | CR-4 | Diff and history functions: proposal diff, commit diff, `main` history with parsed trailers (`src/git/git.ts:231`), and the paths that differ between `main` and agent HEAD. | No. |
-| CR-5 | Durable knowledge backlog (§5.5) and the capture entry point (append a user turn, with no reply). It replaces the in-memory chain (`src/pipeline/session.ts:60–75`) and fixes each run's input range. It implements F3's tracking half. Sessions from before CR-5 get a baseline with no replay (§5.5 item 9). Using the marker to show the extractor which turns are context only is a follow-up. | **Yes.** It changes how and when knowledge runs happen, and it makes running older `brain` binaries against the same `BRAIN_HOME` unsupported. The pipeline stages (`docs/spec.md` §36) stay the same. |
+| CR-5 | Durable knowledge backlog (§5.5) and the capture entry point (append a user turn, with no reply). It replaces the in-memory chain (`src/pipeline/session.ts:60–75`) and fixes each run's input range. It implements F3's tracking half. Sessions from before CR-5 get a baseline with no replay (§5.5 item 9). Using the marker to show the extractor which turns are context only is a follow-up. | **Yes — deferred by the owner (2026-10-02).** It changes how and when knowledge runs happen, and it makes running older `brain` binaries against the same `BRAIN_HOME` unsupported. The pipeline stages (`docs/spec.md` §36) stay the same. |
 | CR-6 | Scripted model provider for deterministic RPC transcripts, selected with `BRAIN_MODEL_SCRIPT=<file>` and built on `MockModelProvider`. The existing mock makes no knowledge extraction (`src/cli.ts:555`). | No; it is test only. |
 | CR-7 | Git version floor, decided from test results (§11). | **Yes.** It changes README and `brain doctor`. |
 | CR-8 | Turn timestamps exposed at the store level (`TurnLine.at`, `src/conversation/store.ts:29`) without changing `ConversationTurn`. | No. |
 | CR-9 | Per-session cross-process turn lock, using the CR-1 primitive, and on-disk turn id allocation (§5.4). | No. It restores the uniqueness that provenance URIs already assume. |
-| CR-10 | Loop-owner lock (§5.3 item 2). `brain watch` holds it for its lifetime, and the RPC child runs its loop only while it holds it. `watch.pid` is written only after acquisition, and `brain doctor` reads the lock's side file. | **Yes.** `brain watch` now waits while another process owns the loop, instead of starting a second loop. |
+| CR-10 | Loop-owner lock (§5.3 item 2). `brain watch` holds it for its lifetime, and the RPC child runs its loop only while it holds it. `watch.pid` is written only after acquisition, and `brain doctor` reads the lock's side file. | **Yes — approved 2026-10-02.** `brain watch` now waits while another process owns the loop, instead of starting a second loop. |
 | CR-11 | `ClaudeModelProvider` accepts credentials and a base URL from the passed env; `NO_MODEL` checks the private env (§10). | No. This is an additive option, and CLI behavior is unchanged. |
 
 **Rejected alternative to CR-1.** A per-repo lease held for the whole life

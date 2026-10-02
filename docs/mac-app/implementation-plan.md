@@ -69,15 +69,15 @@ instead of restating it, so there is only one source for each test.
   servers only, and no build that returns `UNKNOWN_METHOD` for these
   methods is released with the app.
 
-**Waiting for the owner**:
+**Owner decisions** (status as of 2026-10-02):
 
-| Decision | Blocks |
-|---|---|
-| CR-1 sign-off (design §15) | O1, T0.3–T0.6, T0.7 (it uses the CR-1 primitive), T0.11 |
-| CR-10 sign-off | T0.8 (which also needs CR-1, through T0.3) |
-| CR-7 sign-off; floor chosen from the T0.10a results | T0.10b |
-| CR-5 sign-off | O2, M2 |
-| Capture session target (design §14.5) | T2.4 |
+| Decision | Status | Blocks |
+|---|---|---|
+| CR-1 sign-off (design §15) | Approved | O1 still has to land before T0.4 |
+| CR-10 sign-off | Approved | — |
+| CR-7 sign-off; floor chosen from the T0.10a results | Waiting for T0.10a | T0.10b |
+| CR-5 sign-off | Deferred | O2, M2 |
+| Capture session target (design §14.5) | Decided: one per day | — |
 
 ## 3. Overview
 
@@ -755,9 +755,10 @@ Tests:
 Commit: `feat(knowledge): durable backlog sweeper`
 
 ### T2.4 — Capture entry point `[core]` `[rpc]`
-Depends: T2.3. Gate: CR-5 and the decision on design §14.5.
+Depends: T2.3. Gate: CR-5.
 - A `capture.submit` path that appends one user turn and makes no reply.
-  Its session target comes from the §14.5 decision.
+  The turn goes to the current day's capture session, which is created on
+  first use and marked as a capture session in its header (design §14.5).
 
 Tests (protocol §9): capture while the provider fails.
 Commit: `feat: quick capture entry point`

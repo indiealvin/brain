@@ -235,7 +235,7 @@ knowledge run still happens.
 | `conversation.create` | `{}` | — | `{sessionId}` | `ConversationStore.createSession` |
 | `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order | `getTurns` / `lastTurns` |
 | `conversation.send` | `{sessionId, text}` | `reply.delta {text}` | `{turn: TurnDTO, assistantTurn: TurnDTO, contextNotes: ContextNote[]}` | `runTurn`, `src/pipeline/session.ts:88` |
-| `capture.submit` | `{text, sessionId?}` | — | `{sessionId, turn: TurnDTO}` | new, CR-5. The parameter shape is provisional until `design.md` §14.5 decides where captures go; `sessionId` is ignored if a dedicated capture session is chosen |
+| `capture.submit` | `{text}` | — | `{sessionId, turn: TurnDTO}` | new, CR-5. The capture joins the current day's capture session, which is created on first use (`design.md` §14.5). `sessionId` in the result names it |
 | `knowledge.backlog` | `{sessionId?}` | — | `SessionBacklog[]` (sessions whose backlog is not empty, or just the given session) | new, CR-5; `design.md` §5.5 item 7 |
 | `knowledge.runs` | `{sessionId?, limit?=50, cursor?: string}` | — | `{runs: KnowledgeRun[], nextCursor?: string}`, newest first. `cursor` is an opaque value copied from a previous `nextCursor`, and `nextCursor` is absent on the last page | new, CR-5 |
 
@@ -255,7 +255,7 @@ state on background work.
 `capture.submit` returns once the user turn is durably appended. It makes
 no reply and no model call on the save path. Knowledge maintenance runs
 later, and it is retried once a model is available, using the F3 marker
-(CR-5). Which session a capture joins is still open (`design.md` §14.5).
+(CR-5). A capture joins the current day's capture session (`design.md` §14.5).
 Its `knowledge.event` notifications are keyed by the captured turn, the
 same way as for `conversation.send`.
 
