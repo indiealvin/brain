@@ -57,6 +57,21 @@ describe("matchers in the sibling match field", () => {
     for (const [m, value, want] of cases) expect([m, value, ok({ v: "recorded" }, { v: value }, { "/v": m })]).toEqual([m, value, want]);
   });
 
+  test("<id:PREFIX> accepts PREFIX_<ULID> with exactly that prefix and nothing else", () => {
+    const cases: [MatchSpec[string], unknown, boolean][] = [
+      ["<id:mut>", `mut_${ULID_B}`, true],
+      ["<id:prop>", `prop_${ULID_B}`, true],
+      ["<id:mut>", `prop_${ULID_B}`, false],
+      ["<id:prop>", `mut_${ULID_B}`, false],
+      ["<id:mut>", ULID_B, false],
+      ["<id:mut>", `mut_${ULID_B.toLowerCase()}`, false],
+      ["<id:mut>", `mut_${ULID_B}x`, false],
+      ["<id:mut>", `xmut_${ULID_B}`, false],
+      ["<id:mut>", 42, false],
+    ];
+    for (const [m, value, want] of cases) expect([m, value, ok({ v: "recorded" }, { v: value }, { "/v": m })]).toEqual([m, value, want]);
+  });
+
   test("<any> accepts any value, including objects and arrays, but the field must exist", () => {
     for (const v of [null, 0, "x", [1, 2], { loopOwner: "self", owner: { kind: "watch", pid: 1 } }]) expect(ok({ data: { engine: { loopOwner: "other" } } }, { data: { engine: v } }, { "/data/engine": "<any>" })).toBe(true);
     expect(ok({ data: { engine: {} } }, { data: {} }, { "/data/engine": "<any>" })).toBe(false);
@@ -109,6 +124,21 @@ describe("substitution and binding", () => {
     expect(subs.applyDeep({ params: { sessionId: ULID_A, nested: [`x/${ULID_A}`] } })).toEqual({ params: { sessionId: ULID_B, nested: [`x/${ULID_B}`] } });
   });
 
+  test("an <id:PREFIX> match binds like <ulid>: later lines and client messages carry the actual id", () => {
+    const subs = new Substitutions();
+    const [recProp, recMut] = [`prop_${ULID_A}`, `mut_${ULID_A}`];
+    const [actProp, actMut] = [`prop_${ULID_B}`, `mut_${ULID_C}`];
+    const match: MatchSpec = { "/data/0/proposalId": "<id:prop>", "/data/0/mutationId": "<id:mut>" };
+    expect(matchMessage({ data: [{ proposalId: recProp, mutationId: recMut }] }, { data: [{ proposalId: actProp, mutationId: actMut }] }, match, subs)).toBeNull();
+    expect([subs.get(recProp), subs.get(recMut)]).toEqual([actProp, actMut]);
+    // the request that names the proposal, and an exact comparison in a later result
+    expect(subs.applyDeep({ params: { proposalId: recProp } })).toEqual({ params: { proposalId: actProp } });
+    expect(ok({ data: { mutationId: recMut, state: "INTEGRATED" } }, { data: { mutationId: actMut, state: "INTEGRATED" } }, undefined, subs)).toBe(true);
+    // the same recorded id must meet the same actual id at a later matcher too
+    expect(matchMessage({ m: recMut }, { m: `mut_${ULID_B}` }, { "/m": "<id:mut>" }, subs)?.reason).toContain("was bound to");
+    expect(ok({ m: recMut }, { m: actMut }, { "/m": "<id:mut>" }, subs)).toBe(true);
+  });
+
   test("a binding is a consistent relation: one recorded value meets one actual value, and vice versa", () => {
     const subs = new Substitutions();
     expect(ok({ a: ULID_A }, { a: ULID_B }, { "/a": "<ulid>" }, subs)).toBe(true);
@@ -149,6 +179,9 @@ describe("lintMatch", () => {
   test("rejects unknown matchers, pointers outside msg, and a msg that fails its own match", () => {
     expect(lintMatch({ a: ULID_A }, { "/a": "<ulid>" })).toBeNull();
     expect(lintMatch({ a: 1 }, { "/a": "<uuid>" })).toContain("not a matcher");
+    expect(lintMatch({ a: `prop_${ULID_A}` }, { "/a": "<id:prop>" })).toBeNull();
+    for (const bad of ["<id:>", "<id:MUT>", "<id:mut_>", "<id>"]) expect(lintMatch({ a: `mut_${ULID_A}` }, { "/a": bad })).toContain("not a matcher");
+    expect(lintMatch({ a: `mut_${ULID_A}` }, { "/a": "<id:prop>" })).toContain("does not satisfy its own match");
     expect(lintMatch({ a: 1 }, { "/b": "<any>" })).toContain("does not resolve");
     expect(lintMatch({ a: "x" }, { "/a": "<sha>" })).toContain("does not satisfy its own match");
     expect(lintMatch({ a: ["x"] }, { "/a": { $contains: ["y"] } })).toContain("does not satisfy its own match");

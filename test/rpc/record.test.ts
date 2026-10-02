@@ -55,12 +55,19 @@ describe("recorder", () => {
     60_000,
   );
 
-  test("autoMatch: forms, staging and machine-specific values, repo.changed domains", () => {
+  test("autoMatch: forms, prefixed ids, staging and machine-specific values, repo.changed domains", () => {
     expect(autoMatch({ type: "repo.changed", data: { domains: ["git", "index"], mainHead: "a".repeat(40), at: "2026-10-02T10:00:00.000Z" } }, undefined)).toEqual({
       "/data/domains": { $contains: ["git", "index"] },
       "/data/mainHead": "<sha>",
       "/data/at": "<iso>",
     });
     expect(autoMatch({ id: "1", type: "result", data: { checks: [{ detail: "01M3YYVXW2YZWXMC5XA0VFBQ7Z" }], ok: true } }, "doctor.run")).toEqual({ "/data/checks": "<any>" });
+    // prefixed ids get a binding matcher with their own prefix, so later requests can name them
+    const result = { proposalId: "prop_01M3YYVXW2YZWXMC5XA0VFBQ7Z", mutationId: "mut_01M3YZ0VY8587TRM86CDP0F1WV", noteId: "01M3YZ1VH1ZSGMFMS8FR4PNJTY", note: "not_an_id" };
+    expect(autoMatch({ id: "2", type: "result", data: [result] }, "proposals.list")).toEqual({
+      "/data/0/proposalId": "<id:prop>",
+      "/data/0/mutationId": "<id:mut>",
+      "/data/0/noteId": "<ulid>",
+    });
   });
 });

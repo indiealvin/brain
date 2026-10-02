@@ -8,9 +8,10 @@
  * The input is a transcript without server lines (any `s2c` lines are
  * ignored): a header, then `c2s` and `test` lines, written with the recorded
  * temp root (`header.tmp`, default `/tmp/brain-transcript`) where paths go.
- * A client message may reuse a value from an earlier result with a string
- * that is exactly `{{ref:<id><JSON Pointer into its result data>}}`, e.g.
- * `"sessionId": "{{ref:c1/sessionId}}"`; the recorded line holds the value.
+ * A client message or a step may reuse a value from an earlier result with a
+ * string that is exactly `{{ref:<id><JSON Pointer into its result data>}}`,
+ * e.g. `"sessionId": "{{ref:c1/sessionId}}"`; the recorded line holds the
+ * value.
  *
  * The recorder starts a server exactly as a replay does, sends each line or
  * performs each step, then collects server messages until none has arrived
@@ -24,11 +25,11 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { ISO_RE, resolvePointer, SHA_RE, Substitutions, ULID_RE, escapePointerToken, type MatchSpec } from "./match";
+import { ISO_RE, PREFIXED_ID_RE, resolvePointer, SHA_RE, Substitutions, ULID_RE, escapePointerToken, type MatchSpec } from "./match";
 import type { ServerMessage } from "./process";
 import { createRun } from "./replay";
 import { stepHandler, type StepContext } from "./steps";
-import { formatTranscript, isRequestMessage, isTerminal, parseTranscript, type TranscriptLine } from "./transcript";
+import { formatTranscript, isRequestMessage, isTerminal, parseTranscript, type Step, type TranscriptLine } from "./transcript";
 import "./index";
 
 export const DEFAULT_RECORDED_TMP = "/tmp/brain-transcript";
@@ -46,7 +47,9 @@ export interface RecordOptions {
 
 /**
  * Proposed matchers for one recorded message: `<ulid>`, `<sha>` and `<iso>`
- * for strings of those forms, and the T1.3 staging and machine-specific
+ * for strings of those forms, `<id:PREFIX>` for a prefixed id such as
+ * `mut_<ULID>` or `prop_<ULID>` (binding like `<ulid>`, so a later request
+ * can name it), and the T1.3 staging and machine-specific
  * values as `<any>` (`initialize`'s `/data/engine` and `/data/brainVersion`,
  * `doctor.run`'s `/data/checks`), and every error's `/error/message` (codes
  * are the contract, messages are for logs). `repo.changed` domains get
@@ -68,7 +71,9 @@ export function autoMatch(msg: ServerMessage, method: string | undefined): Match
   const walk = (v: unknown, ptr: string) => {
     if (match[ptr] !== undefined) return;
     if (typeof v === "string") {
+      const prefix = PREFIXED_ID_RE.exec(v)?.[1];
       if (ULID_RE.test(v)) match[ptr] = "<ulid>";
+      else if (prefix !== undefined) match[ptr] = `<id:${prefix}>`;
       else if (SHA_RE.test(v)) match[ptr] = "<sha>";
       else if (ISO_RE.test(v)) match[ptr] = "<iso>";
     } else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${ptr}/${i}`));
@@ -174,21 +179,27 @@ export async function recordTranscript(inputText: string, opts: RecordOptions): 
       state: run.state,
     };
 
+    // A referenced result may still be on its way.
+    const awaitRefs = async (v: unknown) => {
+      const deadline = Date.now() + timeoutMs;
+      while (refsIn(v).some((id) => !terminated.has(id)) && !server.exited && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    };
+
     let sentShutdown = false;
     for (const line of input.lines) {
       lastArrival = Date.now();
       if (line.dir === "c2s") {
-        // A referenced result may still be on its way.
-        const deadline = Date.now() + timeoutMs;
-        while (refsIn(line.msg).some((id) => !terminated.has(id)) && !server.exited && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+        await awaitRefs(line.msg);
         const msg = canonical().applyDeep(resolveRefs(line.msg) as Record<string, unknown>);
         if (typeof msg["id"] === "string" && typeof msg["method"] === "string") methods.set(msg["id"], msg["method"]);
         if (msg["method"] === "shutdown") sentShutdown = true;
         out.push({ dir: "c2s", msg, lineNo: 0 });
         server.sendRaw(JSON.stringify(subs.applyDeep(msg)));
       } else if (line.dir === "test") {
-        out.push({ dir: "test", step: line.step, lineNo: 0 });
-        await stepHandler(line.step.op)(line.step, ctx);
+        await awaitRefs(line.step);
+        const step = canonical().applyDeep(resolveRefs(line.step) as Step);
+        out.push({ dir: "test", step, lineNo: 0 });
+        await stepHandler(step.op)(step, ctx);
       }
       await settle();
     }

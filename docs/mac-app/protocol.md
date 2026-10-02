@@ -340,7 +340,7 @@ method in v1 (`design.md` §14.1).
 |---|---|---|
 | `knowledge.event` | `{sessionId, turnId, event: KnowledgeEvent, summary?: string}` | Every `KnowledgeEvent` of a run executed by this server. `summary` is set only on `event.type === "done"` and comes from `formatKnowledgeSummary` (`src/pipeline/knowledge.ts:216`). Every run ends with `done`, also one that failed inside; its failure is in `update.errors`. CR-5 adds two variants. `{type: "deferred", reason: string}` means the run will be retried (`design.md` §5.5 item 4). `{type: "interrupted"}` means a run is finished without being re-run after a crash (item 6). Both are additive (§8) |
 | `repo.changed` | `RepoChanged` (below) | Some domain changed, whoever changed it: this process, `brain watch`, or a CLI command. The server checks every `intervalMs` whatever the loop owner. The client re-fetches the views of the listed domains |
-| `proposals.changed` | `{}` | This process created or decided a proposal, or a `proposals.list` / `proposals.get` refresh marked one STALE. It is sent immediately, without waiting for the next check. The next `repo.changed` also lists `"proposals"` |
+| `proposals.changed` | `{}` | This process created or decided a proposal, or a `proposals.list` / `proposals.get` refresh marked one STALE. Precisely: one per proposal this process created, and one per operation of this process that decided or marked STALE any proposal. Those operations are an accept or a reject (including the staleness refresh each runs first), the refresh of `proposals.list`, `proposals.get` or a knowledge run's planning, and a drain's accept reconciliation. An operation that changed nothing sends none, for example an accept that returns `REPLAN` / `"STALE"` for a proposal already decided. Another process's changes are reported only by `repo.changed`. It is sent immediately, without waiting for the next check. The next `repo.changed` also lists `"proposals"` |
 | `engine.loopOwner` | `EngineInfo` | This server acquired the loop-owner lock and started its loop (`design.md` §5.3 item 2). It never loses the lock while running, so there is no reverse transition |
 | `engine.tick` | `EngineTick` | Only when `loopOwner: "self"`: after ticks where `changed` is true, or where drained results include a state other than `INTEGRATED` |
 | `engine.humanSync` | `{sha}` | Only when `loopOwner: "self"`: Human Sync committed quiescent edits (`SyncResult.committed`, `src/core/types.ts:298`) |
@@ -592,14 +592,16 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
     field, which maps a JSON Pointer inside `msg` to a matcher, and only
     the Bun harness applies them. The matchers are:
     - `"<ulid>"`, `"<sha>"`, `"<iso>"`: a value of that form;
+    - `"<id:PREFIX>"`, such as `"<id:mut>"` or `"<id:prop>"`: a prefixed
+      id `PREFIX_<ULID>` (§7), with exactly that prefix;
     - `"<any>"`: any value;
     - `{"$contains": [x, …]}`: the array holds every listed element, and
       may hold others.
 
-    Without a matcher, a value matches exactly. A `<ulid>` or `<sha>`
-    match binds the recorded value to the actual one, and the Bun harness
-    rewrites the recorded value to the actual one in every later line, so
-    a later request can carry an id from an earlier result.
+    Without a matcher, a value matches exactly. A `<ulid>`, `<id:PREFIX>`
+    or `<sha>` match binds the recorded value to the actual one, and the
+    Bun harness rewrites the recorded value to the actual one in every
+    later line, so a later request can carry an id from an earlier result.
   - `repo.changed.domains` always gets a `$contains` matcher, because one
     poll can catch several domains, and new domains are additive (§8).
   - Server messages match as subsets: extra fields are ignored (§2).

@@ -1,0 +1,47 @@
+{
+  "chat": [{ "response": "Then neither the approval queue nor the review checklist has to gate an agent action." }],
+  "extractor": [
+    {
+      "response": {
+        "candidates": [
+          {
+            "kind": "decision",
+            "claim": "Retire the approval queue and the review checklist now that every agent action is reversible",
+            "groundedSources": ["{{lastUser}}"],
+            "inferences": []
+          }
+        ]
+      }
+    }
+  ],
+  "planner": [
+    {
+      "response": {
+        "operations": [
+          {
+            "op": "ARCHIVE",
+            "noteIds": ["01JA0000000000000000000001"],
+            "writes": [
+              {
+                "path": "knowledge/approval-queue.md",
+                "content": "---\nid: 01JA0000000000000000000001\ncreated: 2026-09-01\ntype: decision\nstatus: archived\n---\n# Approval queue\n\n## Claim\nEvery agent action waits in the approval queue until I approve it.\n"
+              }
+            ],
+            "reasoning": "the approval queue is retired once agent actions are reversible"
+          },
+          {
+            "op": "ARCHIVE",
+            "noteIds": ["01JA0000000000000000000002"],
+            "writes": [
+              {
+                "path": "knowledge/review-checklist.md",
+                "content": "---\nid: 01JA0000000000000000000002\ncreated: 2026-09-02\ntype: idea\nstatus: archived\n---\n# Review checklist\n\n## Claim\nEvery agent action is checked against the review checklist before approval.\n"
+              }
+            ],
+            "reasoning": "the review checklist is retired once agent actions are reversible"
+          }
+        ]
+      }
+    }
+  ]
+}

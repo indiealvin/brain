@@ -46,6 +46,7 @@ import type { EmbeddingProvider, ModelProvider } from "../core/types";
 import type { SessionDeps } from "../pipeline/session";
 import type { EngineInfo, ProviderEnv, WireError } from "./dto";
 import { RpcError, toWireError, type RpcErrorCode } from "./errors";
+import { watchProposalChanges } from "./methods/proposals";
 import { isPlainObject, type Params } from "./params";
 import { Redactor } from "./redact";
 
@@ -416,11 +417,16 @@ export class RpcServer {
     this.phaseValue = "initializing";
   }
 
-  /** The open sequence succeeded. Its coordinator is closed in shutdown step 5, after every later `onClose` hook. */
+  /**
+   * The open sequence succeeded. Its coordinator is closed in shutdown step 5,
+   * after every later `onClose` hook. From now on its proposal changes are
+   * sent as `proposals.changed` (protocol §5).
+   */
   completeInitialize(session: RpcSession): void {
     this.sessionValue = session;
     this.phaseValue = "ready";
     this.onClose(() => session.coord.close());
+    watchProposalChanges(this, session.coord);
   }
 
   /** The open sequence failed: back to "uninitialized", so `initialize` can be retried. */
