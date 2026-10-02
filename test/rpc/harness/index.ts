@@ -3,6 +3,7 @@
  * registers every step handler.
  */
 import "./conversation";
+import "./engine";
 import "./openrouterStub";
 import "./seed";
 

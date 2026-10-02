@@ -367,12 +367,12 @@ describe("initialize", () => {
     expect(h.logs.join("\n")).not.toMatch(/sk-(ant|or)-(param|config)/);
   });
 
-  test("result: repo id, user worktree, state dir, and the staging engine value (loopOwner other, no owner)", async () => {
+  test("result: repo id, user worktree, state dir, and the engine (no other process holds the loop: loopOwner self, no owner)", async () => {
     const { repo, home } = repoFixture();
     const h = makeServer();
     const r = await initialize(h, repo, { engine: { intervalMs: 250 } });
     const s = h.server.session;
-    expect(r.data).toEqual({ protocolVersion: 1, brainVersion: expect.any(String), repoId: s.repoId, userWorktree: repo, stateDir: `${home}/repos/${s.repoId}`, engine: { loopOwner: "other", intervalMs: 250 } });
+    expect(r.data).toEqual({ protocolVersion: 1, brainVersion: expect.any(String), repoId: s.repoId, userWorktree: repo, stateDir: `${home}/repos/${s.repoId}`, engine: { loopOwner: "self", intervalMs: 250 } });
     expect(r.data.engine.owner).toBeUndefined();
   });
 
