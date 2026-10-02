@@ -29,6 +29,12 @@ interface TurnLine {
   at: string;
 }
 
+/**
+ * A turn as stored (CR-8): the core `ConversationTurn` plus `at`, the
+ * ISO-8601 time `appendTurn` wrote to `TurnLine.at`, returned verbatim.
+ */
+export type StoredTurn = ConversationTurn & { at: string };
+
 export interface SessionSummary {
   sessionId: string;
   createdAt: string;
@@ -40,6 +46,8 @@ export interface ConversationStore {
   createSession(): string;
   appendTurn(sessionId: string, role: TurnRole, text: string): ConversationTurn;
   getTurns(sessionId: string): ConversationTurn[];
+  /** The same turns as `getTurns`, in session order, each with its stored timestamp. */
+  getStoredTurns(sessionId: string): StoredTurn[];
   lastTurns(sessionId: string, n: number): ConversationTurn[];
   listSessions(): SessionSummary[];
   hasSession(sessionId: string): boolean;
@@ -133,6 +141,11 @@ class JsonlConversationStore implements ConversationStore {
   getTurns(sessionId: string): ConversationTurn[] {
     if (!isUlid(sessionId)) return [];
     return this.readLines(sessionId).turns.map((t) => ({ sessionId, turnId: t.turnId, role: t.role, text: t.text }));
+  }
+
+  getStoredTurns(sessionId: string): StoredTurn[] {
+    if (!isUlid(sessionId)) return [];
+    return this.readLines(sessionId).turns.map((t) => ({ sessionId, turnId: t.turnId, role: t.role, text: t.text, at: t.at }));
   }
 
   lastTurns(sessionId: string, n: number): ConversationTurn[] {
