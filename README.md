@@ -23,6 +23,11 @@ brain doctor                   # checks git, key, model id, embedding dims
 macOS, Linux (x64 and arm64). Set `BRAIN_INSTALL_DIR` to change the target
 directory (default `~/.local/bin`).
 
+Mixed versions are unsupported from v0.2.0 on: every `brain` process sharing a
+`BRAIN_HOME` (the CLI, the `brain watch` service, the Mac app's bundled copy)
+must be the same version. `brain doctor` warns when the `brain` on `PATH` is a
+different version from the one running it.
+
 ## Quick start
 
 ```bash

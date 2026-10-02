@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import pkg from "../../package.json" with { type: "json" };
 import { commitAsHuman, writeNote } from "../harness";
 import { parseArgs, findRepoRoot } from "../../src/cli";
 
@@ -320,6 +321,37 @@ describe("brain setup / doctor (first-run configuration)", () => {
       const missing = run(["doctor", "--offline", "--repo", join(repo, "nope")], { env: { OPENROUTER_API_KEY: KEY } });
       expect(missing.code).toBe(1);
       expect(missing.err).toContain("brain.toml");
+    },
+    60_000,
+  );
+
+  test(
+    "doctor warns when the brain on PATH is another version, without failing (design §5.2, §5.5 item 9)",
+    () => {
+      const fresh = mkdtempSync(join(tmpdir(), "brain-cli-mixed-"));
+      try {
+        const bin = join(fresh, "bin");
+        mkdirSync(bin);
+        const fake = join(bin, "brain");
+        const PATH = `${bin}:${process.env.PATH ?? ""}`; // first on PATH; bun and git stay reachable
+        writeFileSync(fake, '#!/bin/sh\necho "brain 0.0.1"\n');
+        chmodSync(fake, 0o755);
+        const mixed = run(["doctor", "--offline"], { cwd: fresh, home: fresh, env: { OPENROUTER_API_KEY: KEY, PATH } });
+        expect(mixed.code).toBe(0);
+        expect(mixed.out).toMatch(/\[warn\] brain on PATH\s+/);
+        expect(mixed.out).toContain(`${fake} is 0.0.1 but this brain is ${pkg.version} (`);
+        expect(mixed.out).toContain(resolve(import.meta.dir, "../../src/cli.ts")); // running from source: the entry script names this brain
+        expect(mixed.out).toContain("all required checks passed");
+
+        writeFileSync(fake, `#!/bin/sh\necho "brain ${pkg.version}"\n`);
+        const same = run(["doctor", "--offline", "--json"], { cwd: fresh, home: fresh, env: { OPENROUTER_API_KEY: KEY, PATH } });
+        expect(same.code).toBe(0);
+        const check = JSON.parse(same.out).checks.find((c: { name: string }) => c.name === "brain on PATH");
+        expect(check.status).toBe("ok");
+        expect(check.detail).toContain(`${fake} is ${pkg.version}`);
+      } finally {
+        rmSync(fresh, { recursive: true, force: true });
+      }
     },
     60_000,
   );
