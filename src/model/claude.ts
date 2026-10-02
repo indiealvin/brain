@@ -97,7 +97,25 @@ class ExplicitCredentialsAnthropic extends Anthropic {
   }
 }
 
-function sdkClient(opts: ClaudeModelProviderOptions): Anthropic {
+/** Options for `createAnthropicClient`: credentials as for `ClaudeModelProviderOptions`, plus SDK transport knobs. */
+export interface AnthropicClientOptions {
+  apiKey?: string;
+  authToken?: string;
+  baseURL?: string;
+  /** Credentials come only from the options; see the header comment. Default false. */
+  isolated?: boolean;
+  timeout?: number;
+  maxRetries?: number;
+}
+
+/**
+ * The SDK client for these credentials: the one place that decides between
+ * the SDK's own credential lookup (default, the CLI) and isolated mode (the
+ * RPC server's private env). Used by `ClaudeModelProvider` and by `brain
+ * doctor`'s live model check (src/config/doctor.ts).
+ */
+export function createAnthropicClient(opts: AnthropicClientOptions): Anthropic {
+  const transport = { ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}), ...(opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}) };
   if (opts.isolated) {
     // `null`, never `undefined`: the SDK reads process.env for `undefined`.
     return new ExplicitCredentialsAnthropic({
@@ -105,6 +123,7 @@ function sdkClient(opts: ClaudeModelProviderOptions): Anthropic {
       authToken: opts.authToken || null,
       baseURL: opts.baseURL || null,
       webhookKey: null,
+      ...transport,
     });
   }
   // `undefined` leaves the SDK's own lookup in place (same as `new Anthropic()`).
@@ -112,7 +131,12 @@ function sdkClient(opts: ClaudeModelProviderOptions): Anthropic {
     apiKey: opts.apiKey || undefined,
     authToken: opts.authToken || undefined,
     baseURL: opts.baseURL || undefined,
+    ...transport,
   });
+}
+
+function sdkClient(opts: ClaudeModelProviderOptions): Anthropic {
+  return createAnthropicClient({ apiKey: opts.apiKey, authToken: opts.authToken, baseURL: opts.baseURL, isolated: opts.isolated });
 }
 
 /** Transport / API failure. `retryable` is true for 429, 5xx and connection errors. */

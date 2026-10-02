@@ -33,8 +33,8 @@ waits for.
 
 | Task | What | Waits for (core) | Ready |
 |---|---|---|---|
-| T3.1 | Xcode project in `apps/mac/`. Bundle the `darwin-arm64` / `darwin-x64` binaries from `bun run build:all`. Signing and notarization can wait for §2 | T1.3 (`brain rpc --stdio`) | no |
-| T3.2 | BrainKit: spawn the child, JSONL codec, request correlation, notification stream, `Codable` DTOs with `unknown(String)` enum cases, `UNKNOWN_METHOD` treated as "feature absent". Replay `test/rpc/transcripts/*.jsonl` in the Swift tests: decode `msg` only, and skip `test` lines (protocol §9) | T1.3 | no |
+| T3.1 | Xcode project in `apps/mac/`. Bundle the `darwin-arm64` / `darwin-x64` binaries from `bun run build:all`. Signing and notarization can wait for §2 | T1.3 (`brain rpc --stdio`) | **yes** |
+| T3.2 | BrainKit: spawn the child, JSONL codec, request correlation, notification stream, `Codable` DTOs with `unknown(String)` enum cases, `UNKNOWN_METHOD` treated as "feature absent". Replay `test/rpc/transcripts/*.jsonl` in the Swift tests: decode `msg` only, and skip `test` lines (protocol §9) | T1.3 | **yes** |
 | T3.3 | First run and Settings: repo picker, `repo.init`, `doctor.run`, keys in Keychain passed as `initialize.env`, restart the child when settings change, warn when the `brain` on `PATH` differs from the bundled one | T1.3, T0.9 | no |
 | T3.4 | Conversation: sessions, streaming `reply.delta`, `SESSION_BUSY` handling. Per-turn knowledge chips appear only after T2.5 | T1.5 | no |
 | T3.6 | Proposal Inbox: diff rendering (`FileDiff`, including `beforeUnavailable`), accept / reject, the `REPLAN` → "note changed" experience | T1.6, T1.8 | no |
@@ -66,5 +66,17 @@ T3.6 and T3.7.
 - `brain watch`, when installed as a login service, owns the loop. The app
   then reports `loopOwner: "other"` and polls (design §5.3). Both can run
   at the same time.
+- BrainKit must decode a message's `id` as an optional string. A line the
+  server can't attribute to a request gets an error with `"id": null`
+  (protocol §2; transcript `test/rpc/transcripts/framing.jsonl`).
+- Decoding notes from T1.4:
+  - `Outlink.targetNoteId` is `null` for a dangling link.
+  - `RepoStatus.queue` always has all nine `MutationState` keys.
+  - To page back through a conversation, call `conversation.get` with
+    `beforeTurnId = turns[0].turnId` until `hasMore` is false.
+  - `notes.get` can briefly return `UNKNOWN_NOTE` while the index catches
+    up. Refetch on the next `repo.changed`.
+- Transcript headers may carry `tmp` and `modelScript`, which are Bun-only.
+  The Swift replay ignores them and skips `test` lines (protocol §9).
 - One `runtime/locks/turn-<sessionId>.sqlite` file per session accumulates
   over time. That is expected; cleanup can come later.

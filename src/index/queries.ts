@@ -57,6 +57,16 @@ export function allNotes(db: IndexDb): NoteRow[] {
   return db.query(`SELECT ${NOTE_COLUMNS} FROM notes ORDER BY path`).all() as NoteRow[];
 }
 
+/** At most `limit` notes in `allNotes` order (by path), skipping the first `offset`. */
+export function notesPage(db: IndexDb, offset: number, limit: number): NoteRow[] {
+  return db.query(`SELECT ${NOTE_COLUMNS} FROM notes ORDER BY path LIMIT ? OFFSET ?`).all(limit, offset) as NoteRow[];
+}
+
+/** Number of indexed notes. */
+export function noteCount(db: IndexDb): number {
+  return (db.query("SELECT COUNT(*) AS n FROM notes").get() as { n: number }).n;
+}
+
 /** Aliases (raw text) declared by `noteId`, in insertion order. */
 export function aliasesOfNote(db: IndexDb, noteId: string): string[] {
   const rows = db.query("SELECT alias FROM aliases WHERE note_id = ? ORDER BY rowid").all(noteId) as { alias: string }[];

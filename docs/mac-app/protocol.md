@@ -68,6 +68,15 @@ The protocol does not depend on stdio. A later `runtime/rpc.sock` transport
   `SESSION_BUSY`, because a fast reply can release the lock within the
   bound.
 - Unknown `type` values and unknown fields must be ignored by the client.
+  The server likewise ignores unknown request and `params` fields. A
+  missing or `null` `params` is `{}`.
+- A line the server cannot attribute to a request gets an `error` with
+  **`"id": null`** and code `INVALID_PARAMS`: a line that is not JSON, a
+  value that is not an object with a string `id`, or a request that reuses
+  the `id` of a request still in flight (`data: {id}`; the stream of the
+  request already using that id is left intact). The message never quotes
+  the line. A request with a string `id` but a missing `method` or a
+  non-object `params` gets `INVALID_PARAMS` with its own `id`.
 
 ## 3. Lifecycle
 
@@ -229,7 +238,7 @@ knowledge run still happens.
 |---|---|---|---|---|
 | `conversation.list` | `{}` | — | `SessionSummary[]` | `src/conversation/store.ts:32` |
 | `conversation.create` | `{}` | — | `{sessionId}` | `ConversationStore.createSession` |
-| `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order | `getTurns` / `lastTurns` |
+| `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order. `hasMore` is true when older turns exist | `getStoredTurns` (CR-8), paged by `conversationTurns`, `src/commands/conversation.ts` |
 | `conversation.send` | `{sessionId, text}` | `reply.delta {text}` | `{turn: TurnDTO, assistantTurn: TurnDTO, contextNotes: ContextNote[]}` | `runTurn`, `src/pipeline/session.ts:88` |
 | `capture.submit` | `{text}` | — | `{sessionId, turn: TurnDTO}` | new, CR-5. The capture joins the current day's capture session, which is created on first use (`design.md` §14.5). `sessionId` in the result names it |
 | `knowledge.backlog` | `{sessionId?}` | — | `SessionBacklog[]` (sessions whose backlog is not empty, or just the given session) | new, CR-5; `design.md` §5.5 item 7 |
@@ -258,6 +267,10 @@ same way as for `conversation.send`.
 Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:90`), `SESSION_BUSY`
 (§2), `NO_MODEL`
 (`src/cli.ts:558`), `MODEL_ERROR` (provider error message, redacted).
+`conversation.get` with a `beforeTurnId` that is not a turn of the session
+returns `INVALID_PARAMS` (`data: {sessionId, beforeTurnId}`). Turns are
+never removed, so a client that pages with ids it was given never gets this
+error.
 
 ### Knowledge
 
@@ -268,7 +281,9 @@ Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:90`), `SESSION_BUSY`
 | `notes.get` | `{noteId}` | `NoteDetail` | index + `showFile(agentWorktree, agentHead, path)` |
 
 `notes.get` always reads at agent HEAD (I-23, `design.md` §8). It never
-reads the user worktree file. Error: `UNKNOWN_NOTE`.
+reads the user worktree file. Error: `UNKNOWN_NOTE` (`data: {noteId}`), also
+when the index briefly trails agent HEAD and the note's indexed path is not
+there. The client refetches on the next `repo.changed`.
 
 ### Proposals and mutations
 
@@ -278,7 +293,7 @@ reads the user worktree file. Error: `UNKNOWN_NOTE`.
 | `proposals.get` | `{proposalId}` | `{proposal: Proposal, diff: FileDiff[]}` | Refreshes staleness, then computes the diff (CR-4), both in one CR-1 lock section. This makes the reachability argument below hold |
 | `proposals.accept` | `{proposalId}` | `ExecutionResult` | `acceptProposal`, `src/core/coordinator.ts:275` |
 | `proposals.reject` | `{proposalId, note?}` | `{proposalId, status: "REJECTED"}` | `rejectProposal`, with the compare-and-set of CR-1 (`design.md` §5.2). The PENDING check that is in `src/cli.ts:440` today moves into core |
-| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:155`). The service layer filters, reverses to newest first, and applies the limit |
+| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:155`). The service layer filters, reverses to newest first, and applies the limit. An empty `states` matches nothing |
 
 When the proposal cannot apply, `proposals.accept` returns
 `state: "REPLAN"`. If the proposal was already stale, `error` is `"STALE"`
@@ -551,7 +566,11 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
 - `test/rpc/transcripts/*.jsonl`: recorded sessions.
   - The first line is a header,
     `{"asserts": {"notifications": [<type>, …]}}`, listing the notification
-    types the transcript asserts.
+    types the transcript asserts. Two optional header fields are for the Bun
+    harness only (`test/rpc/harness/transcript.ts`), and the Swift replay
+    ignores them: `tmp`, the temp root as recorded, which the harness maps to
+    the run's own temp root wherever it occurs, so recorded paths stay
+    concrete; and `modelScript`, a model script for the server (CR-6).
   - Every other line is one of these:
     - a message, `{"dir": "c2s" | "s2c", "msg": {…}, "match"?: {…}}`;
     - an out-of-band test step, `{"dir": "test", "step": {…}}`. A step is,
@@ -569,7 +588,10 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
     - `{"$contains": [x, …]}`: the array holds every listed element, and
       may hold others.
 
-    Without a matcher, a value matches exactly.
+    Without a matcher, a value matches exactly. A `<ulid>` or `<sha>`
+    match binds the recorded value to the actual one, and the Bun harness
+    rewrites the recorded value to the actual one in every later line, so
+    a later request can carry an id from an earlier result.
   - `repo.changed.domains` always gets a `$contains` matcher, because one
     poll can catch several domains, and new domains are additive (§8).
   - Server messages match as subsets: extra fields are ignored (§2).

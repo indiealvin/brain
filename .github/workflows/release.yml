@@ -1,15 +1,60 @@
 name: release
 
+# A release is driven by package.json's "version":
+# - A push to main releases v<version> when that tag does not exist yet. A
+#   merge that does not bump the version releases nothing.
+# - A pushed tag v* still releases, but only if it equals v<version>, so a
+#   binary never reports a version other than its tag.
+# The tag and the GitHub release are created by the release job through the
+# API (softprops/action-gh-release). A tag pushed with GITHUB_TOKEN would not
+# trigger another workflow, which is why tagging and building happen in this
+# one workflow.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: decide
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+              echo "::error::pushed tag ${GITHUB_REF_NAME} does not match package.json version $version"
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "will release $tag from ${GITHUB_SHA}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: check
+    if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,6 +90,8 @@ jobs:
           if-no-files-found: error
 
   test:
+    needs: check
+    if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +108,8 @@ jobs:
           GIT_COMMITTER_EMAIL: ci@example.com
 
   release:
-    needs: [build, test]
+    needs: [check, build, test]
+    if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +126,8 @@ jobs:
           cd /tmp/smoke-notes && BRAIN_MODEL_MOCK=1 "$GITHUB_WORKSPACE/assets/brain" chat --once hello --wait
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.check.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             assets/*.tar.gz
             assets/*.sha256

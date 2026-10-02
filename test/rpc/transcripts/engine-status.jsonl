@@ -1,0 +1,11 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z194A5M22X3QRG0ZV2J4JG","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"2c5b446a85223bb8089e3d619cdcb1ce400dcb1b"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"},"engine":{"intervalMs":250}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z194A5M22X3QRG0ZV2J4JG","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z194A5M22X3QRG0ZV2J4JG","engine":{"loopOwner":"other","intervalMs":250}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"1","method":"engine.status","params":{}}}
+{"dir":"s2c","msg":{"id":"1","type":"result","data":{"loopOwner":"other","intervalMs":250}},"match":{"/data":"<any>"}}
+{"dir":"c2s","msg":{"id":"2","method":"engine.status","params":{"ignored":1}}}
+{"dir":"s2c","msg":{"id":"2","type":"result","data":{"loopOwner":"other","intervalMs":250}},"match":{"/data":"<any>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}
