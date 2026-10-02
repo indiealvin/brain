@@ -105,7 +105,17 @@ export class Queue {
     this.now = opts.now ?? (() => new Date().toISOString());
   }
 
-  /** Insert as QUEUED with seq = max+1. No-op when the id already exists. */
+  /**
+   * Insert as QUEUED with seq = max+1. No-op when the id already exists.
+   *
+   * An immediate transaction (CR-1): it takes SQLite's write lock before it
+   * reads `MAX(seq)`, so another process's enqueue waits (`busy_timeout`)
+   * instead of failing. A deferred transaction reads first and then upgrades
+   * to a write; in WAL mode that upgrade fails at once with `SQLITE_BUSY`
+   * when another connection is writing or has written since the read, and
+   * the busy timeout does not retry it. `enqueue` runs outside the worktree
+   * lock, so two processes can enqueue at the same time.
+   */
   enqueue(mutation: Mutation): void {
     const ts = this.now();
     const tx = this.db.transaction(() => {
@@ -133,7 +143,7 @@ export class Queue {
           ts,
         );
     });
-    tx();
+    tx.immediate();
   }
 
   private raw(id: string): DbRow | undefined {
