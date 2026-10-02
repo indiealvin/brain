@@ -27,3 +27,22 @@ jobs:
           export BRAIN_HOME=$(mktemp -d)
           /tmp/brain init /tmp/smoke-notes
           cd /tmp/smoke-notes && BRAIN_MODEL_MOCK=1 /tmp/brain chat --once hello --wait
+
+  # The same suite on macOS. test/unit/sqliteLockPlatform.test.ts logs which
+  # SQLite library bun:sqlite uses here (system or bundled) and pins the lock
+  # behavior of docs/mac-app/design.md §5.2 against it.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com
