@@ -1,0 +1,17 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"1","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"1","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3YZ1VH1ZSGMFMS8FR4PNJTY","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"2c4f2d96888dd488407188febc779df826e287c8"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"2","method":"initialize","params":{"protocolVersion":2,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"2","type":"error","error":{"code":"PROTOCOL_MISMATCH","message":"this server speaks protocol version 1, not 2","data":{"protocolVersion":1}}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"3","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/not-a-repo"}}}
+{"dir":"s2c","msg":{"id":"3","type":"error","error":{"code":"NOT_A_REPO","message":"/tmp/brain-transcript/not-a-repo is not a knowledge repo (no brain.toml); create it with repo.init"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"4","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"PATH":"/usr/bin","ANTHROPIC_API_KEY":"sk-ant-transcript-not-a-real-key"}}}}
+{"dir":"s2c","msg":{"id":"4","type":"error","error":{"code":"INVALID_PARAMS","message":"env accepts only ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, BRAIN_MODEL_PROVIDER, BRAIN_MODEL, BRAIN_EFFORT, BRAIN_EMBEDDINGS, BRAIN_EMBEDDING_MODEL, BRAIN_EMBEDDING_DIMS; got PATH"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"5","method":"initialize","params":{"protocolVersion":1,"repoPath":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"5","type":"error","error":{"code":"INVALID_PARAMS","message":"client is required: {name: string, version: string}"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"6","method":"repo.status","params":{}}}
+{"dir":"s2c","msg":{"id":"6","type":"error","error":{"code":"NOT_INITIALIZED","message":"repo.status needs a successful initialize first"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"7","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"ANTHROPIC_API_KEY":"sk-ant-transcript-not-a-real-key"},"unknownField":true}}}
+{"dir":"s2c","msg":{"id":"7","type":"result","data":{"protocolVersion":1,"brainVersion":"0.1.4","repoId":"01M3YZ1VH1ZSGMFMS8FR4PNJTY","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3YZ1VH1ZSGMFMS8FR4PNJTY","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"8","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"8","type":"result","data":{}}}

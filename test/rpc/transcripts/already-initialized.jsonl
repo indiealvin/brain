@@ -1,0 +1,13 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"1","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"1","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3YZ0VY8587TRM86CDP0F1WV","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"30087a4866f3405460bff6d684e4dcc32b61bacd"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"2","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","engine":{"intervalMs":250}}}}
+{"dir":"s2c","msg":{"id":"2","type":"result","data":{"protocolVersion":1,"brainVersion":"0.1.4","repoId":"01M3YZ0VY8587TRM86CDP0F1WV","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3YZ0VY8587TRM86CDP0F1WV","engine":{"loopOwner":"other","intervalMs":250}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"3","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"3","type":"error","error":{"code":"ALREADY_INITIALIZED","message":"the server is already initialized; restart it to change the repo or env"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"4","method":"repo.init","params":{"path":"/tmp/brain-transcript/other"}}}
+{"dir":"s2c","msg":{"id":"4","type":"result","data":{"path":"/tmp/brain-transcript/other","repoId":"01M3YZ0XA7SHHG923ES3BY0V2S","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"1d2e82ac4ca75372fef10963972b8e3692b7eac3"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"5","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/other"}}}
+{"dir":"s2c","msg":{"id":"5","type":"error","error":{"code":"ALREADY_INITIALIZED","message":"the server is already initialized; restart it to change the repo or env"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"6","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"6","type":"result","data":{}}}

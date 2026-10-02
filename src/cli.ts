@@ -52,6 +52,7 @@ import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, 
 import { formatKnowledgeSummary } from "./pipeline/knowledge";
 import { ProposalNotPendingError, UnknownProposalError } from "./proposal/store";
 import { runTurn, type SessionDeps } from "./pipeline/session";
+import { runStdioServer } from "./rpc/stdio";
 import { startHumanSyncWatcher } from "./sync/humanSync";
 import { setLockHolderKind } from "./sync/lock";
 
@@ -89,6 +90,8 @@ commands:
                                      talk to your knowledge base; REPL on stdin unless --once
                                      (/quit, /proposals). --wait prints the knowledge summary
                                      before exiting in --once mode (it is always awaited).
+  rpc --stdio                        JSONL protocol server for the Mac app (docs/mac-app/protocol.md);
+                                     stdout carries protocol lines only, logs go to stderr
 
 options:
   --repo <dir>   knowledge repo (default: walk up from cwd to find ${CONFIG_FILE})
@@ -937,6 +940,23 @@ async function cmdDoctor(args: ParsedArgs, io: Io): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// rpc
+// ---------------------------------------------------------------------------
+
+/**
+ * `brain rpc --stdio`: the JSONL server the Mac app spawns (src/rpc,
+ * docs/mac-app/protocol.md). stdio is the only transport. The server exits
+ * the process itself once it has drained (protocol §3).
+ */
+async function cmdRpc(args: ParsedArgs, io: Io): Promise<number> {
+  if (args.flags["stdio"] !== true || args.positional.length > 1) {
+    io.err("usage: brain rpc --stdio (stdio is the only transport)");
+    return 2;
+  }
+  return runStdioServer();
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -956,6 +976,9 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
     io.err(USAGE);
     return 2;
   }
+  // The RPC server never projects config.toml onto process.env: it builds a private env
+  // per protocol.md §3 (design §10), so it is dispatched before the projection below.
+  if (cmd === "rpc") return await cmdRpc(args, io);
   // First-run configuration: project $BRAIN_HOME/config.toml onto unset environment
   // variables before any provider is created. `setup` works from the raw environment
   // so an existing file never shadows the values it is about to write.

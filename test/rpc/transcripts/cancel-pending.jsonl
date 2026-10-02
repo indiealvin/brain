@@ -1,0 +1,16 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"test","step":{"op":"openrouterStub.start","as":"http://openrouter.stub","hold":["/auth/key"]}}
+{"dir":"c2s","msg":{"id":"d1","method":"doctor.run","params":{"env":{"OPENROUTER_API_KEY":"sk-or-v1-transcript-not-a-real-key","OPENROUTER_BASE_URL":"http://openrouter.stub","BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"test","step":{"op":"openrouterStub.awaitRequest","path":"/auth/key"}}
+{"dir":"c2s","msg":{"id":"c1","method":"cancel","params":{"target":"d1"}}}
+{"dir":"s2c","msg":{"id":"d1","type":"error","error":{"code":"CANCELLED","message":"request d1 (doctor.run) was cancelled; its work continues"}},"match":{"/error/message":"<any>"}}
+{"dir":"s2c","msg":{"id":"c1","type":"result","data":{"cancelled":true}}}
+{"dir":"c2s","msg":{"id":"c2","method":"cancel","params":{"target":"d1"}}}
+{"dir":"s2c","msg":{"id":"c2","type":"result","data":{"cancelled":false}}}
+{"dir":"c2s","msg":{"id":"s1","method":"shutdown","params":{}}}
+{"dir":"c2s","msg":{"id":"x1","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"x1","type":"error","error":{"code":"SHUTTING_DOWN","message":"the server is shutting down"}},"match":{"/error/message":"<any>"}}
+{"dir":"test","step":{"op":"expectPending","ids":["s1"],"forMs":300}}
+{"dir":"test","step":{"op":"openrouterStub.release","path":"/auth/key"}}
+{"dir":"s2c","msg":{"id":"s1","type":"result","data":{}}}
+{"dir":"test","step":{"op":"openrouterStub.expectRequests","paths":["/auth/key","/models"]}}
