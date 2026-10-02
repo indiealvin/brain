@@ -1,0 +1,7 @@
+{
+  "chat": [
+    { "fail": { "message": "upstream rejected key sk-or-v1-transcript-not-a-real-key", "retryable": false, "status": 401 } },
+    { "response": "Back again." }
+  ],
+  "extractor": [{ "response": { "candidates": [] }, "repeat": true }]
+}

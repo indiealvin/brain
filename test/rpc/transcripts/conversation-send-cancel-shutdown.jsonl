@@ -1,0 +1,18 @@
+{"asserts":{"notifications":["knowledge.event"]},"tmp":"/tmp/brain-transcript","modelScript":"scripts/reply-held.json"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z2T7JHQ6DC7WZ3010KCBR3","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"4422e291e943d9f5e38718bbf01af2f911af0ad7"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z2T7JHQ6DC7WZ3010KCBR3","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z2T7JHQ6DC7WZ3010KCBR3","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-10-02T08:00:00.000Z","turns":[]}}
+{"dir":"c2s","msg":{"id":"send","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"Cancel me, but keep my turn."}}}
+{"dir":"test","step":{"op":"modelScript.awaitCall","role":"chat"}}
+{"dir":"c2s","msg":{"id":"cancel","method":"cancel","params":{"target":"send"}}}
+{"dir":"s2c","msg":{"id":"send","type":"error","error":{"code":"CANCELLED","message":"request send (conversation.send) was cancelled; its work continues"}},"match":{"/error/message":"<any>"}}
+{"dir":"s2c","msg":{"id":"cancel","type":"result","data":{"cancelled":true}}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"test","step":{"op":"expectPending","ids":["bye"],"forMs":300}}
+{"dir":"test","step":{"op":"modelScript.release","file":"release-reply"}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"extracted","accepted":0,"rejected":0}}}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"done","update":{"candidates":{"accepted":0,"rejected":0},"mutations":[],"proposals":[],"dropped":[],"noop":true,"errors":[]}},"summary":"Knowledge unchanged"}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}
+{"dir":"test","step":{"op":"conversation.expectTurns","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","turns":[{"turnId":"000001","role":"user","text":"Cancel me, but keep my turn."},{"turnId":"000002","role":"assistant","text":"Stored after the release, before shutdown finishes."}]}}

@@ -1,0 +1,17 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript","modelScript":"scripts/send-model-error.json"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z2T1QT1SNYNJKHABN9M423","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"6e45b24149bdef049ade3f0dd2493a719a4a71d9"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing","OPENROUTER_API_KEY":"sk-or-v1-transcript-not-a-real-key"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z2T1QT1SNYNJKHABN9M423","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z2T1QT1SNYNJKHABN9M423","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-10-02T08:00:00.000Z","turns":[]}}
+{"dir":"c2s","msg":{"id":"fail","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"Is this thing on?"}}}
+{"dir":"s2c","msg":{"id":"fail","type":"error","error":{"code":"MODEL_ERROR","message":"upstream rejected key [redacted]"}}}
+{"dir":"c2s","msg":{"id":"get1","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1"}}}
+{"dir":"s2c","msg":{"id":"get1","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Is this thing on?","at":"2026-10-02T19:52:40.334Z"}],"hasMore":false}},"match":{"/data/turns/0/at":"<iso>"}}
+{"dir":"c2s","msg":{"id":"ok","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"Trying again."}}}
+{"dir":"s2c","msg":{"id":"ok","type":"reply.delta","data":{"text":"Back again."}}}
+{"dir":"s2c","msg":{"id":"ok","type":"result","data":{"turn":{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"user","text":"Trying again.","at":"2026-10-02T19:52:41.140Z"},"assistantTurn":{"sessionId":"01JA00000000000000000000S1","turnId":"000003","role":"assistant","text":"Back again.","at":"2026-10-02T19:52:41.141Z"},"contextNotes":[]}},"match":{"/data/turn/at":"<iso>","/data/assistantTurn/at":"<iso>"}}
+{"dir":"c2s","msg":{"id":"get2","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1"}}}
+{"dir":"s2c","msg":{"id":"get2","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Is this thing on?","at":"2026-10-02T19:52:40.334Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"user","text":"Trying again.","at":"2026-10-02T19:52:41.140Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000003","role":"assistant","text":"Back again.","at":"2026-10-02T19:52:41.141Z"}],"hasMore":false}},"match":{"/data/turns/0/at":"<iso>","/data/turns/1/at":"<iso>","/data/turns/2/at":"<iso>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

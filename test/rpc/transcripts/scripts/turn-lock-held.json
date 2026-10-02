@@ -1,0 +1,4 @@
+{
+  "chat": [{ "response": "First reply, held until the test releases it.", "hold": "release-first" }],
+  "extractor": [{ "response": { "candidates": [] }, "repeat": true }]
+}

@@ -1,0 +1,18 @@
+{"asserts":{"notifications":["knowledge.event"]},"tmp":"/tmp/brain-transcript","modelScript":"scripts/reply-held.json"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z2TFAS584R3EDRWV23AYGR","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"8aba42b9dfce9e31e55abc0a5ab579f35cd15a28"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z2TFAS584R3EDRWV23AYGR","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z2TFAS584R3EDRWV23AYGR","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-10-02T08:00:00.000Z","turns":[]}}
+{"dir":"c2s","msg":{"id":"send","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"Answer me before you go."}}}
+{"dir":"test","step":{"op":"modelScript.awaitCall","role":"chat"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"test","step":{"op":"expectPending","ids":["send","bye"],"forMs":300}}
+{"dir":"test","step":{"op":"modelScript.release","file":"release-reply"}}
+{"dir":"s2c","msg":{"id":"send","type":"reply.delta","data":{"text":"Stored after the release, before "}}}
+{"dir":"s2c","msg":{"id":"send","type":"reply.delta","data":{"text":"shutdown finishes."}}}
+{"dir":"s2c","msg":{"id":"send","type":"result","data":{"turn":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Answer me before you go.","at":"2026-10-02T19:52:54.249Z"},"assistantTurn":{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"Stored after the release, before shutdown finishes.","at":"2026-10-02T19:53:00.279Z"},"contextNotes":[]}},"match":{"/data/turn/at":"<iso>","/data/assistantTurn/at":"<iso>"}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"extracted","accepted":0,"rejected":0}}}}
+{"dir":"s2c","msg":{"type":"knowledge.event","data":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","event":{"type":"done","update":{"candidates":{"accepted":0,"rejected":0},"mutations":[],"proposals":[],"dropped":[],"noop":true,"errors":[]}},"summary":"Knowledge unchanged"}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}
+{"dir":"test","step":{"op":"conversation.expectTurns","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","turns":[{"turnId":"000001","role":"user","text":"Answer me before you go."},{"turnId":"000002","role":"assistant","text":"Stored after the release, before shutdown finishes."}]}}

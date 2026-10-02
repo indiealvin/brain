@@ -402,6 +402,16 @@ describe("formatKnowledgeSummary", () => {
     const e = base();
     e.errors = ["x", "y"];
     expect(formatKnowledgeSummary(e)).toBe("Knowledge unchanged · 2 errors");
+    // NOOP is "nothing to change" (I-3): not landed, and never listed as not applied.
+    const n = base();
+    n.mutations = [{ mutationId: "m4", type: "LINK", state: "NOOP", summary: "d" }];
+    expect(formatKnowledgeSummary(n)).toBe("Knowledge unchanged");
+    const mixed = base();
+    mixed.mutations = [
+      { mutationId: "m5", type: "LINK", state: "NOOP", summary: "e" },
+      { mutationId: "m6", type: "ENRICH", state: "FAILED", summary: "f" },
+    ];
+    expect(formatKnowledgeSummary(mixed)).toBe("Knowledge unchanged · 1 not applied (FAILED)");
   });
 });
 

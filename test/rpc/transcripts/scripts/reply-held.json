@@ -1,0 +1,4 @@
+{
+  "chat": [{ "response": "Stored after the release, before shutdown finishes.", "hold": "release-reply" }],
+  "extractor": [{ "response": { "candidates": [] }, "repeat": true }]
+}

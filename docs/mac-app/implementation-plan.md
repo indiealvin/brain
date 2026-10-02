@@ -106,9 +106,9 @@ and checked that its changes stayed in scope.
 | T1.3 | `264f4d6` | 518 |
 | T1.4 | `b746970` | 538 |
 
-**M0 is complete.** Every design §5.2 test passes on Linux and macOS (CI
-37047160031), and the version is 0.2.0, which is released by the next merge
-to `main` (version-driven `release.yml`).
+**M0 is complete and released as v0.2.0** (2026-10-02, tag on `1839733`,
+the first run of the version-driven `release.yml`). Every design §5.2 test
+passes on Linux and macOS (CI 37047160031).
 
 **M1:** T1.5 is in progress; T1.6, T1.7 and T1.8 are next.
 
