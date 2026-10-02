@@ -14,8 +14,24 @@
  *     is sent (adaptive thinking is always on for this model family), no
  *     sampling parameters, no assistant prefill, no forced tool_choice.
  *
- * Credentials are resolved by the SDK from the environment
- * (`ANTHROPIC_API_KEY` or an `ant auth login` profile); nothing is hardcoded.
+ * Credentials (CR-11, design §10): nothing is hardcoded. `apiKey`, `authToken`
+ * and `baseURL` may be passed in; `createModelProvider(env)` fills them from
+ * the env it is given.
+ *   - Default (the CLI): a missing value is passed to the SDK as `undefined`,
+ *     so the SDK resolves it as it always has: `ANTHROPIC_API_KEY`,
+ *     `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` from `process.env`, then its
+ *     default credential chain (`ANTHROPIC_PROFILE`, an `ant auth login`
+ *     profile on disk, OIDC variables).
+ *   - `isolated: true` (the app's private env): the options are the only
+ *     source. A missing value is passed as `null` (the SDK reads `process.env`
+ *     only for `undefined`), `webhookKey` is `null`, and the default credential
+ *     chain is switched off, so a keyless provider fails instead of borrowing
+ *     another identity.
+ * Known SDK reads that isolated mode does not suppress: the client constructor
+ * always reads `ANTHROPIC_CUSTOM_HEADERS` from `process.env` and merges it into
+ * every request's headers (applied after the auth headers, so an `x-api-key:`
+ * line there would win), and reads `ANTHROPIC_LOG` because no `logLevel` is
+ * passed. Both are operator knobs that brain never sets.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { ModelCompleteInput, ModelProvider } from "../core/types";
@@ -50,6 +66,53 @@ export interface ClaudeModelProviderOptions {
   effort?: Effort;
   /** Receives non-fatal warnings (e.g. output truncated at max_tokens). Default: console.warn. */
   warn?: (message: string) => void;
+  /**
+   * Credentials for the SDK client (ignored when `client` is injected). A
+   * given value is always used; `apiKey` is sent as `x-api-key`, `authToken`
+   * as a Bearer token. A missing (or empty) one is resolved by the SDK, unless
+   * `isolated` is set; see the header comment.
+   */
+  apiKey?: string;
+  authToken?: string;
+  baseURL?: string;
+  /**
+   * Credentials come only from the options above: no `process.env` fallback,
+   * no default credential chain; a missing `baseURL` is https://api.anthropic.com.
+   * Default false (CLI behaviour).
+   */
+  isolated?: boolean;
+}
+
+/**
+ * Isolated mode's SDK client: its credentials are exactly the ones it is constructed with.
+ * With neither `apiKey` nor `authToken`, the stock client lazily resolves its
+ * default credential chain from `process.env` and config files on disk; this
+ * SDK hook ("subclasses that bring their own auth scheme return false") turns
+ * that off, so a keyless client fails with "Could not resolve authentication
+ * method" instead of borrowing another identity.
+ */
+class ExplicitCredentialsAnthropic extends Anthropic {
+  protected override _shouldResolveDefaultCredentials(): boolean {
+    return false;
+  }
+}
+
+function sdkClient(opts: ClaudeModelProviderOptions): Anthropic {
+  if (opts.isolated) {
+    // `null`, never `undefined`: the SDK reads process.env for `undefined`.
+    return new ExplicitCredentialsAnthropic({
+      apiKey: opts.apiKey || null,
+      authToken: opts.authToken || null,
+      baseURL: opts.baseURL || null,
+      webhookKey: null,
+    });
+  }
+  // `undefined` leaves the SDK's own lookup in place (same as `new Anthropic()`).
+  return new Anthropic({
+    apiKey: opts.apiKey || undefined,
+    authToken: opts.authToken || undefined,
+    baseURL: opts.baseURL || undefined,
+  });
 }
 
 /** Transport / API failure. `retryable` is true for 429, 5xx and connection errors. */
@@ -99,7 +162,7 @@ export class ClaudeModelProvider implements ModelProvider {
   constructor(opts: ClaudeModelProviderOptions = {}) {
     this.model = opts.model ?? DEFAULT_MODEL;
     this.effort = opts.effort ?? "high";
-    this.client = opts.client ?? new Anthropic();
+    this.client = opts.client ?? sdkClient(opts);
     this.warn = opts.warn ?? ((m) => console.warn(m));
   }
 
