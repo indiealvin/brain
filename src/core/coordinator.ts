@@ -2,11 +2,21 @@
  * RepoCoordinator (spec §21.1, §12, §15, §16, §17). Single entry point per
  * knowledge repo; fixtures drive the engine through this interface.
  *
- * Locking model (I-11): one in-process mutex (`Serial`) serializes every
- * public operation so two executions never interleave; the cross-process
- * RepoWorktreeLock is taken only inside the bodies of sync / integrate /
- * rebuild and is never nested. No `*Unlocked` method ever re-enters the
- * mutex, so the two locks cannot deadlock.
+ * Locking model (spec §12, I-11; CR-1, docs/mac-app/design.md §5.2): every
+ * public method that writes — `submit`, `execute`, `drainQueued`,
+ * `integrate`, `rebuild`, `syncOnce`, `recover`, `reconcileIndex`,
+ * `acceptProposal`, `rejectProposal` and `listProposals` (it writes STALE
+ * marks) — runs through `exclusive()`: the in-process mutex (`Serial`) first,
+ * then the cross-process RepoWorktreeLock, taken exactly once at the top.
+ * Everything those methods call (`*Unlocked`, `integrateOnce`,
+ * `rebuildAgentBranch`, `executeMutation`, Human Sync) runs without taking
+ * either lock, so neither is ever nested. `exclusive()` refuses to start
+ * inside a section that already holds the worktree lock: the nested call
+ * would otherwise wait on the mutex (or the lock) forever.
+ *
+ * Outside the lock on purpose: `enqueue` and `submitProposal` (single inserts
+ * that never touch a worktree, design §5.2), and the read-only queries.
+ * `openCoordinator` takes the lock once, around `ensureAgentWorktree`.
  *
  * Proposals (§33–34) live in the proposal store; an accepted proposal
  * re-enters the queue as a mutation whose preconditions are its snapshots.
@@ -44,9 +54,9 @@ import { mutationId as newMutationId } from "./ids";
 import { blobAt, showFile } from "../git/git";
 import { reconcileIndex as reconcileIndexFiles } from "../index/reconcile";
 import { syncOnce as humanSyncOnce } from "../sync/humanSync";
-import { withRepoWorktreeLock } from "../sync/lock";
+import { assertLockNotHeldInThisChain, withRepoWorktreeLock, WORKTREE_LOCK } from "../sync/lock";
 
-/** In-process single-writer mutex: serializes execute / integrate / sync / rebuild / recover. */
+/** In-process single-writer mutex: serializes every locked public method (see `exclusive`). */
 class Serial {
   private tail: Promise<unknown> = Promise.resolve();
   run<T>(fn: () => Promise<T>): Promise<T> {
@@ -72,16 +82,33 @@ class Coordinator implements RepoCoordinator {
     this.clock = clock;
   }
 
+  /**
+   * The single-writer section of every public write (CR-1): the in-process
+   * mutex, then the cross-process worktree lock, then `fn`. Called only at the
+   * top of a public method, never from inside one: a call from a section that
+   * already holds the lock throws `LockReentryError` at once, since it would
+   * otherwise wait forever on the mutex that its own caller is running in.
+   */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      assertLockNotHeldInThisChain(this.paths.runtimeDir, WORKTREE_LOCK);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return this.mutex.run(() => withRepoWorktreeLock(this.paths.runtimeDir, fn));
+  }
+
   // -- rebuild (§13) --------------------------------------------------------
 
+  /** Caller holds the worktree lock. */
   private rebuildUnlocked(): Promise<RebuildResult> {
-    return withRepoWorktreeLock(this.paths.runtimeDir, () => rebuildAgentBranch({ paths: this.paths, queue: this.queue }));
+    return rebuildAgentBranch({ paths: this.paths, queue: this.queue });
   }
 
   /**
    * Bring `agent/repo` up to date with `main` before executing: with no
    * un-integrated commits this is a plain move (zero-pending rebuild);
-   * otherwise the pending mutations are replayed under the lock.
+   * otherwise the pending mutations are replayed. Caller holds the worktree lock.
    */
   private async catchUpAgentBranch(): Promise<void> {
     if (!mainMoved(this.paths)) return;
@@ -94,6 +121,7 @@ class Coordinator implements RepoCoordinator {
 
   // -- execution (§12) ------------------------------------------------------
 
+  /** Caller holds the worktree lock. */
   private async executeUnlocked(mutationId: string): Promise<ExecutionResult> {
     if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
     await this.catchUpAgentBranch();
@@ -104,11 +132,11 @@ class Coordinator implements RepoCoordinator {
   }
 
   async execute(mutationId: string): Promise<ExecutionResult> {
-    return this.mutex.run(() => this.executeUnlocked(mutationId));
+    return this.exclusive(() => this.executeUnlocked(mutationId));
   }
 
   async submit(mutation: Mutation): Promise<ExecutionResult> {
-    return this.mutex.run(async () => {
+    return this.exclusive(async () => {
       this.queue.enqueue(mutation);
       const r = await this.executeUnlocked(mutation.mutationId);
       if (r.state === "COMMITTED") await this.integrateUnlocked();
@@ -119,6 +147,7 @@ class Coordinator implements RepoCoordinator {
 
   // -- integration (§15) ----------------------------------------------------
 
+  /** Caller holds the worktree lock. */
   private integrateUnlocked(): Promise<IntegrationResult> {
     return integrateOnce({
       paths: this.paths,
@@ -135,7 +164,7 @@ class Coordinator implements RepoCoordinator {
    * Reconcile the index to agent HEAD. A human rename (same id, new path)
    * enqueues an automatic ADD_ALIAS of the old slug (§21) unless the note
    * already carries it. The mutation is only queued; it executes on the next
-   * execute()/submit() or via drainQueued().
+   * execute()/submit() or via drainQueued(). Caller holds the worktree lock.
    */
   private async reconcileIndexUnlocked(): Promise<ReconcileResult> {
     const head = agentHead(this.paths);
@@ -174,7 +203,7 @@ class Coordinator implements RepoCoordinator {
 
   /** Execute every QUEUED automatic mutation in seq order, then integrate. */
   async drainQueued(): Promise<ExecutionResult[]> {
-    return this.mutex.run(async () => {
+    return this.exclusive(async () => {
       const out: ExecutionResult[] = [];
       for (const row of this.queue.listByState(["QUEUED"])) out.push(await this.executeUnlocked(row.mutationId));
       if (out.some((r) => r.state === "COMMITTED")) await this.integrateUnlocked();
@@ -183,24 +212,24 @@ class Coordinator implements RepoCoordinator {
   }
 
   async integrate(): Promise<IntegrationResult> {
-    return this.mutex.run(() => this.integrateUnlocked());
+    return this.exclusive(() => this.integrateUnlocked());
   }
 
   async rebuild(): Promise<RebuildResult> {
-    return this.mutex.run(() => this.rebuildUnlocked());
+    return this.exclusive(() => this.rebuildUnlocked());
   }
 
   // -- human sync (§16) -----------------------------------------------------
 
+  /** `now` defaults to the clock once the lock is held, so quiescence is judged at commit time. */
   async syncOnce(now?: number): Promise<SyncResult> {
-    const t = now ?? this.clock.now();
-    return this.mutex.run(() => withRepoWorktreeLock(this.paths.runtimeDir, () => humanSyncOnce(this.paths, this.config, t)));
+    return this.exclusive(() => humanSyncOnce(this.paths, this.config, now ?? this.clock.now()));
   }
 
   // -- recovery (§17 steps 1–4) ---------------------------------------------
 
   async recover(): Promise<void> {
-    await this.mutex.run(async () => {
+    await this.exclusive(async () => {
       ensureAgentWorktree(this.paths);
       if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
       for (const row of this.queue.listByState(["RUNNING"])) {
@@ -244,12 +273,12 @@ class Coordinator implements RepoCoordinator {
   // -- index projection API -------------------------------------------------
 
   async reconcileIndex(): Promise<ReconcileResult> {
-    return this.mutex.run(() => this.reconcileIndexUnlocked());
+    return this.exclusive(() => this.reconcileIndexUnlocked());
   }
 
   // -- proposals (§33–34) ---------------------------------------------------
 
-  /** I-19: mark PENDING proposals STALE when any target blob differs at agent HEAD. */
+  /** I-19: mark PENDING proposals STALE when any target blob differs at agent HEAD. Caller holds the worktree lock. */
   private refreshProposalStaleness(): string[] {
     return this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
   }
@@ -258,8 +287,9 @@ class Coordinator implements RepoCoordinator {
     this.proposals.create(proposal);
   }
 
+  /** Writes STALE marks, so it takes the worktree lock like every other write (CR-1). */
   async listProposals(): Promise<Proposal[]> {
-    return this.mutex.run(async () => {
+    return this.exclusive(async () => {
       this.refreshProposalStaleness();
       return this.proposals.list();
     });
@@ -273,7 +303,7 @@ class Coordinator implements RepoCoordinator {
    * preconditions (REPLAN) the proposal becomes STALE (§34).
    */
   async acceptProposal(proposalId: string): Promise<ExecutionResult> {
-    return this.mutex.run(async () => {
+    return this.exclusive(async () => {
       const found = this.proposals.get(proposalId);
       if (!found) throw new Error(`acceptProposal: unknown proposal ${proposalId}`);
       if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
@@ -307,7 +337,9 @@ class Coordinator implements RepoCoordinator {
   }
 
   async rejectProposal(proposalId: string, decisionNote?: string): Promise<void> {
-    this.proposals.decide(proposalId, "REJECTED", { decisionNote, resolvedAt: this.nowIso() });
+    await this.exclusive(async () => {
+      this.proposals.decide(proposalId, "REJECTED", { decisionNote, resolvedAt: this.nowIso() });
+    });
   }
 
   async negativeEvidenceFor(noteIds: string[]): Promise<Proposal[]> {
@@ -326,11 +358,21 @@ class Coordinator implements RepoCoordinator {
   }
 }
 
+/**
+ * Open the coordinator for the knowledge repo at `userWorktree`.
+ *
+ * `ensureAgentWorktree` can `checkout`, `rm -rf` or `reset --hard` the agent
+ * worktree, so it runs under the worktree lock (CR-1): another process may be
+ * in the middle of executing there (design §5.1). It stays here rather than in
+ * `recover()` because callers (the fixture harness among them) open and
+ * execute without recovering. Opening therefore waits while another process
+ * holds the lock.
+ */
 export async function openCoordinator(userWorktree: string, opts: { clock?: Clock } = {}): Promise<RepoCoordinator> {
   const config = loadConfig(userWorktree);
   const paths = repoPaths(userWorktree, config.repoId);
   for (const dir of [paths.stateDir, paths.conversationsDir, paths.runtimeDir]) mkdirSync(dir, { recursive: true });
-  ensureAgentWorktree(paths);
+  await withRepoWorktreeLock(paths.runtimeDir, async () => ensureAgentWorktree(paths));
   const queue = openQueue(paths.queueDb);
   const proposals = openProposalStore(paths.proposalsDb);
   const clock: Clock = opts.clock ?? { now: () => Date.now() };

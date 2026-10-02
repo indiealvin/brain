@@ -207,6 +207,10 @@ type Coord = RepoCoordinator & { drainQueued(): Promise<ExecutionResult[]> };
  * fast-forwarded so the index (step 5) reflects the human's latest commits.
  * `fastForwardAgentToMain` is a no-op otherwise; a real rebuild happens in
  * `integrate`.
+ *
+ * Each step takes the worktree lock on its own, one after the other (CR-1):
+ * `recover()` and `reconcileIndex()` inside the coordinator, the fast-forward
+ * here. None of them runs inside another, so the lock is never nested.
  */
 async function openRepo(flags: ParsedArgs["flags"]): Promise<{ coord: Coord; reconciled: ReconcileResult }> {
   const opened = await openCoordinator(resolveRepo(flags));

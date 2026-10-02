@@ -12,8 +12,10 @@ import { join } from "node:path";
 import {
   acquireLock,
   createLockFile,
+  holdsLockInThisChain,
   isLockHeld,
   LockBusyError,
+  LockReentryError,
   lockFilePath,
   lockHolderPath,
   locksDir,
@@ -24,7 +26,9 @@ import {
   type LockHandle,
 } from "../../src/sync/lock";
 import { LONG_HELD_LOCK_MS, runDoctor, worktreeLockCheck } from "../../src/config/doctor";
-import { makeTempKnowledgeRepo, withBrainHome } from "../harness";
+import { repoPaths } from "../../src/core/brainHome";
+import { openCoordinator } from "../../src/core/coordinator";
+import { createMutation, gitOk, makeTempKnowledgeRepo, revParse, withBrainHome } from "../harness";
 
 const LOCK_MODULE = join(import.meta.dir, "..", "..", "src", "sync", "lock.ts");
 /** Per-test timeout for tests that spawn `bun` children. */
@@ -205,6 +209,58 @@ describe("wait modes", () => {
     });
     expect(outer).toBe("outer");
     expect(isLockHeld(dir, WORKTREE_LOCK)).toBe(false);
+  });
+
+  test("re-entry guard: a nested blocking acquisition in the same call chain throws LockReentryError at once", async () => {
+    const dir = tempDir();
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false);
+    const outer = await withRepoWorktreeLock(dir, async () => {
+      expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(true);
+      await sleep(1); // still the same chain after an await
+      const t0 = Date.now();
+      const nested = await withRepoWorktreeLock(dir, async () => "inner").catch((e: unknown) => e);
+      expect(nested).toBeInstanceOf(LockReentryError);
+      expect((nested as LockReentryError).lock).toBe(WORKTREE_LOCK);
+      await expect(acquireLock(dir, WORKTREE_LOCK, { mode: "blocking" })).rejects.toBeInstanceOf(LockReentryError);
+      // the same runtime dir spelled differently is the same lock
+      await expect(withRepoWorktreeLock(`${dir}/./`, async () => "inner")).rejects.toBeInstanceOf(LockReentryError);
+      expect(Date.now() - t0).toBeLessThan(1_000);
+      // another lock, or the same name under another runtime dir, is not re-entry
+      expect(await withLock(dir, "other", { mode: "blocking" }, async () => "other")).toBe("other");
+      const elsewhere = tempDir();
+      expect(await withRepoWorktreeLock(elsewhere, async () => "elsewhere")).toBe("elsewhere");
+      return "outer";
+    });
+    expect(outer).toBe("outer");
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false);
+    expect(isLockHeld(dir, WORKTREE_LOCK)).toBe(false);
+  });
+
+  test("re-entry guard: independent callers in one process still wait for each other", async () => {
+    const dir = tempDir();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let laterFromInside: Promise<string> | null = null;
+    const a = withRepoWorktreeLock(dir, async () => {
+      order.push("a-start");
+      // A task started inside the section but run after it ends inherits the section's scope; it is
+      // not re-entry once the section is over, so it takes the lock normally.
+      laterFromInside = gate.then(() => withRepoWorktreeLock(dir, async () => (order.push("late"), "late")));
+      await sleep(100);
+      order.push("a-end");
+    });
+    await sleep(10);
+    // a sibling chain started while `a` holds the lock: waits, does not throw
+    const b = withRepoWorktreeLock(dir, async () => {
+      expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(true);
+      order.push("b");
+    });
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false); // the caller's own chain holds nothing
+    await Promise.all([a, b]);
+    release();
+    expect(await laterFromInside!).toBe("late");
+    expect(order).toEqual(["a-start", "a-end", "b", "late"]);
   });
 
   test("the event loop stays responsive while a waiter waits, in each mode", async () => {
@@ -469,6 +525,75 @@ describe("brain doctor: worktree lock", () => {
 
     h.release();
     expect(worktreeLockCheck(dir).detail).toBe("free");
+  });
+
+  test(
+    "runDoctor never waits for the worktree lock: with a holder in another process it reads heads and queue without it",
+    async () => {
+      const bh = withBrainHome();
+      const repo = makeTempKnowledgeRepo();
+      try {
+        const coord = await openCoordinator(repo.path);
+        const runtimeDir = coord.paths.runtimeDir;
+        await coord.enqueue(createMutation("knowledge/queued.md", { title: "Queued" }));
+        await coord.close();
+        const main = revParse(repo.path, "main").slice(0, 12);
+
+        const holder = spawnChild(holderScript(runtimeDir));
+        await holder.waitFor("HELD");
+        // openCoordinator waits for the lock (CR-1) ...
+        let opened = false;
+        const opening = openCoordinator(repo.path).then((c) => {
+          opened = true;
+          return c;
+        });
+        // ... doctor does not.
+        const t0 = Date.now();
+        const report = await Promise.race([runDoctor({ offline: true, repoRoot: repo.path, gitVersion: () => "git version 2.45.0", env: {} }), sleep(10_000).then(() => null)]);
+        expect(report).not.toBeNull();
+        expect(Date.now() - t0).toBeLessThan(5_000);
+        expect(opened).toBe(false);
+        const row = (name: string) => report!.checks.find((c) => c.name === name);
+        expect(row("repo")).toMatchObject({ status: "ok", detail: `${repo.path} (repo_id ${repo.repoId})` });
+        expect(row("heads")).toMatchObject({ status: "ok", detail: `main ${main}  agent ${main} (integrated)` });
+        expect(row("queue")).toMatchObject({ status: "ok", detail: "QUEUED=1" });
+        expect(row("worktree lock")!.detail).toMatch(new RegExp(`^held by test-holder \\(pid ${holder.proc.pid}\\) for \\d+s$`));
+
+        holder.proc.kill("SIGKILL");
+        await holder.proc.exited;
+        await (await opening).close();
+      } finally {
+        repo.cleanup();
+        bh.cleanup();
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  test("runDoctor writes no repo state: on a repo never opened it reports no agent branch and creates nothing", async () => {
+    const bh = withBrainHome();
+    const repo = makeTempKnowledgeRepo();
+    try {
+      const stateDir = repoPaths(repo.path, repo.repoId).stateDir;
+      const report = await runDoctor({ offline: true, repoRoot: repo.path, gitVersion: () => "git version 2.45.0", env: {} });
+      const main = revParse(repo.path, "main").slice(0, 12);
+      expect(report.checks.find((c) => c.name === "heads")).toMatchObject({ status: "ok", detail: `main ${main}  agent (none yet; created on first use)` });
+      expect(report.checks.find((c) => c.name === "queue")).toMatchObject({ status: "ok", detail: "empty" });
+      expect(existsSync(stateDir)).toBe(false);
+      expect(gitOk(repo.path, "rev-parse", "--verify", "-q", "refs/heads/agent/repo")).toBe(false);
+
+      const broken = makeTempKnowledgeRepo();
+      try {
+        rmSync(join(broken.path, ".git"), { recursive: true, force: true });
+        const r = await runDoctor({ offline: true, repoRoot: broken.path, gitVersion: () => "git version 2.45.0", env: {} });
+        expect(r.checks.find((c) => c.name === "repo")).toMatchObject({ status: "fail", detail: `${broken.path}: branch main does not exist; run \`brain init\` first` });
+      } finally {
+        broken.cleanup();
+      }
+    } finally {
+      repo.cleanup();
+      bh.cleanup();
+    }
   });
 
   test("runDoctor reports the repo's worktree lock", async () => {
