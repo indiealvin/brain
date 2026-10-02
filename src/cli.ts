@@ -3,8 +3,9 @@
  * `brain` command-line entry point (Phase 11a).
  *
  * Every command except `init` opens the coordinator for the resolved repo,
- * runs crash recovery (spec §17 steps 1–4 via `recover()`, step 5 via
- * `reconcileIndex()`), then does its work. Repo resolution: `--repo <dir>`,
+ * runs crash recovery (spec §17 steps 1–6, including accept reconciliation,
+ * via `recover()`; step 5 again via `reconcileIndex()` after the agent branch
+ * catches up), then does its work. Repo resolution: `--repo <dir>`,
  * else walk up from cwd until a `brain.toml` is found.
  *
  * `chat` runs the conversation pipeline (src/pipeline): the reply is
