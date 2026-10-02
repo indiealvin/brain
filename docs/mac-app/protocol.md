@@ -271,6 +271,10 @@ Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:98`), `SESSION_BUSY`
 (§2), `NO_MODEL`
 (`src/commands/providers.ts:53`), `MODEL_ERROR` (provider error message,
 redacted).
+`conversation.send` also returns `INVALID_PARAMS` for a missing or blank
+`text`. `INVALID_PARAMS`, `UNKNOWN_SESSION`, `NO_MODEL` and `SESSION_BUSY`
+leave the session unchanged. With `MODEL_ERROR` the user turn is already
+stored, without a reply, as in `brain chat`.
 `conversation.get` with a `beforeTurnId` that is not a turn of the session
 returns `INVALID_PARAMS` (`data: {sessionId, beforeTurnId}`). Turns are
 never removed, so a client that pages with ids it was given never gets this
@@ -334,7 +338,7 @@ method in v1 (`design.md` §14.1).
 
 | Type | Data | When |
 |---|---|---|
-| `knowledge.event` | `{sessionId, turnId, event: KnowledgeEvent, summary?: string}` | Every `KnowledgeEvent` of a run executed by this server. `summary` is set only on `event.type === "done"` and comes from `formatKnowledgeSummary` (`src/pipeline/knowledge.ts:216`). CR-5 adds two variants. `{type: "deferred", reason: string}` means the run will be retried (`design.md` §5.5 item 4). `{type: "interrupted"}` means a run is finished without being re-run after a crash (item 6). Both are additive (§8) |
+| `knowledge.event` | `{sessionId, turnId, event: KnowledgeEvent, summary?: string}` | Every `KnowledgeEvent` of a run executed by this server. `summary` is set only on `event.type === "done"` and comes from `formatKnowledgeSummary` (`src/pipeline/knowledge.ts:216`). Every run ends with `done`, also one that failed inside; its failure is in `update.errors`. CR-5 adds two variants. `{type: "deferred", reason: string}` means the run will be retried (`design.md` §5.5 item 4). `{type: "interrupted"}` means a run is finished without being re-run after a crash (item 6). Both are additive (§8) |
 | `repo.changed` | `RepoChanged` (below) | Some domain changed, whoever changed it: this process, `brain watch`, or a CLI command. The server checks every `intervalMs` whatever the loop owner. The client re-fetches the views of the listed domains |
 | `proposals.changed` | `{}` | This process created or decided a proposal, or a `proposals.list` / `proposals.get` refresh marked one STALE. It is sent immediately, without waiting for the next check. The next `repo.changed` also lists `"proposals"` |
 | `engine.loopOwner` | `EngineInfo` | This server acquired the loop-owner lock and started its loop (`design.md` §5.3 item 2). It never loses the lock while running, so there is no reverse transition |

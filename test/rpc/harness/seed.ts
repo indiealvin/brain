@@ -93,7 +93,7 @@ registerStep("conversation.seed", (step, ctx) => {
   const createdAt = stepString(step, "createdAt");
   const turns = step["turns"];
   if (!Array.isArray(turns)) throw new Error("step conversation.seed: turns must be an array");
-  const dir = withBrainHome(ctx.home, () => repoPaths(repo, loadConfig(repo).repoId).conversationsDir);
+  const dir = conversationsDir(ctx, repo);
   mkdirSync(dir, { recursive: true });
   const lines = [JSON.stringify({ kind: "session", sessionId, createdAt })];
   turns.forEach((t: { role: string; text: string; at: string }, i) => {
@@ -101,6 +101,11 @@ registerStep("conversation.seed", (step, ctx) => {
   });
   writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join("\n") + "\n", { flag: "wx" });
 });
+
+/** The conversation store directory of knowledge repo `repo` under this run's BRAIN_HOME. */
+export function conversationsDir(ctx: StepContext, repo: string): string {
+  return withBrainHome(ctx.home, () => repoPaths(repo, loadConfig(repo).repoId).conversationsDir);
+}
 
 /** `repoPaths` reads BRAIN_HOME from the env: evaluate it against this run's home, then restore. */
 function withBrainHome<T>(home: string, fn: () => T): T {

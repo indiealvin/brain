@@ -38,11 +38,12 @@
  * → `UNKNOWN_METHOD`.
  */
 import pkg from "../../package.json" with { type: "json" };
-import { createKnowledgeTracker, type KnowledgeTracker } from "../commands/conversation";
+import { createKnowledgeTracker, openSessionDeps, type KnowledgeTracker } from "../commands/conversation";
 import { chatEmbeddingProvider, chatModelProvider } from "../commands/providers";
 import type { Coord } from "../commands/repo";
 import { applyUserConfigToEnv, loadUserConfig, type UserConfig } from "../config/userConfig";
 import type { EmbeddingProvider, ModelProvider } from "../core/types";
+import type { SessionDeps } from "../pipeline/session";
 import type { EngineInfo, ProviderEnv, WireError } from "./dto";
 import { RpcError, toWireError, type RpcErrorCode } from "./errors";
 import { isPlainObject, type Params } from "./params";
@@ -144,6 +145,7 @@ export class RpcServer {
   private sessionValue: RpcSession | null = null;
   private model: ModelProvider | null = null;
   private embeddings: EmbeddingProvider | null = null;
+  private conversationDepsValue: Promise<SessionDeps> | null = null;
 
   constructor(opts: RpcServerOptions) {
     this.opts = opts;
@@ -455,5 +457,30 @@ export class RpcServer {
     const s = this.session;
     this.embeddings ??= chatEmbeddingProvider(s.env);
     return this.embeddings;
+  }
+
+  /**
+   * What `runTurn` needs besides the turn (`openSessionDeps`): one index
+   * connection and the conversation store, with `modelProvider()` and
+   * `embeddingProvider()`, shared by every turn of this server. Opened on
+   * first use (concurrent first callers share one opening; a failure is not
+   * cached) and closed in shutdown step 5, after the knowledge drain and
+   * before the coordinator. Throws `NoModelError` like `modelProvider()`.
+   * Callers give each turn its own `log` (`{...deps, log}`).
+   */
+  conversationDeps(): Promise<SessionDeps> {
+    if (this.conversationDepsValue === null) {
+      const s = this.session;
+      const providers = { model: this.modelProvider(), embeddings: this.embeddingProvider() };
+      const opening = openSessionDeps(s.coord, providers).then((opened) => {
+        this.onClose(() => opened.close());
+        return opened.deps;
+      });
+      this.conversationDepsValue = opening;
+      opening.catch(() => {
+        if (this.conversationDepsValue === opening) this.conversationDepsValue = null;
+      });
+    }
+    return this.conversationDepsValue;
   }
 }

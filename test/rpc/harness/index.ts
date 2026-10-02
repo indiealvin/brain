@@ -2,6 +2,7 @@
  * The RPC transcript harness (docs/mac-app/protocol.md §9). Importing it
  * registers every step handler.
  */
+import "./conversation";
 import "./openrouterStub";
 import "./seed";
 

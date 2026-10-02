@@ -1,0 +1,8 @@
+{
+  "chunkDelayMs": 50,
+  "chat": [
+    { "response": "One two three four five, six seven eight nine ten, eleven twelve." },
+    { "response": "Second reply." }
+  ],
+  "extractor": [{ "response": { "candidates": [] }, "repeat": true }]
+}

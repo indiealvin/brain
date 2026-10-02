@@ -1,0 +1,17 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript","modelScript":"scripts/turn-lock-held.json"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z2WK4EKG4KDV537AY44X00","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"01a679c697338ed24e09579dfca493ec7bc7e6d9"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z2WK4EKG4KDV537AY44X00","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z2WK4EKG4KDV537AY44X00","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-10-02T08:00:00.000Z","turns":[]}}
+{"dir":"c2s","msg":{"id":"first","method":"conversation.send","params":{"sessionId":"01JA00000000000000000000S1","text":"first"}}}
+{"dir":"test","step":{"op":"modelScript.awaitCall","role":"chat"}}
+{"dir":"test","step":{"op":"chat.once","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","text":"second","expectExitCode":1,"expectStderr":"(SESSION_BUSY)"}}
+{"dir":"test","step":{"op":"modelScript.release","file":"release-first"}}
+{"dir":"s2c","msg":{"id":"first","type":"reply.delta","data":{"text":"First reply, held until the "}}}
+{"dir":"s2c","msg":{"id":"first","type":"reply.delta","data":{"text":"test releases it."}}}
+{"dir":"s2c","msg":{"id":"first","type":"result","data":{"turn":{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"first","at":"2026-10-02T19:54:03.683Z"},"assistantTurn":{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"First reply, held until the test releases it.","at":"2026-10-02T19:54:08.224Z"},"contextNotes":[]}},"match":{"/data/turn/at":"<iso>","/data/assistantTurn/at":"<iso>"}}
+{"dir":"c2s","msg":{"id":"get","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1"}}}
+{"dir":"s2c","msg":{"id":"get","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"first","at":"2026-10-02T19:54:03.683Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"First reply, held until the test releases it.","at":"2026-10-02T19:54:08.224Z"}],"hasMore":false}},"match":{"/data/turns/0/at":"<iso>","/data/turns/1/at":"<iso>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

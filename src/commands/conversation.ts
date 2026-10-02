@@ -1,17 +1,19 @@
 /**
  * Service layer, conversations (CR-2): what a caller of `runTurn` needs
  * besides the open repo. The index connection and conversation store
- * (`openSessionDeps`), creating or resuming a session (`openSession`), and
- * tracking knowledge updates still in flight so the caller can await them
- * before it closes the coordinator (`createKnowledgeTracker`). And the reads
- * behind `conversation.list` / `create` / `get`: listing sessions, creating
- * one, and paging a session's turns with their timestamps (CR-8).
+ * (`openSessionDeps`), creating or resuming a session (`openSession`,
+ * `requireSession`), and tracking knowledge updates still in flight so the
+ * caller can await them before it closes the coordinator
+ * (`createKnowledgeTracker`). And the reads behind `conversation.list` /
+ * `create` / `get`: listing sessions, creating one, and paging a session's
+ * turns with their timestamps (CR-8); `storedTurns` adds the timestamps to
+ * turns `runTurn` just appended (`conversation.send`).
  *
  * Turn I/O stays in the adapters: streaming the reply, spinners and the REPL
  * in the CLI, `reply.delta` events in RPC.
  */
 import { openConversationStore, type ConversationStore, type SessionSummary, type StoredTurn } from "../conversation/store";
-import type { EmbeddingProvider, ModelProvider, RepoCoordinator } from "../core/types";
+import type { ConversationTurn, EmbeddingProvider, ModelProvider, RepoCoordinator } from "../core/types";
 import { openIndex } from "../index/schema";
 import type { KnowledgeUpdate } from "../pipeline/knowledge";
 import type { SessionDeps } from "../pipeline/session";
@@ -86,7 +88,7 @@ export interface TurnPage {
  * is not a turn of the session.
  */
 export function conversationTurns(store: ConversationStore, sessionId: string, opts: { limit?: number; beforeTurnId?: string } = {}): TurnPage {
-  if (!store.hasSession(sessionId)) throw new UnknownSessionError(sessionId, `unknown session ${sessionId}`);
+  requireSession(store, sessionId);
   return pageTurns(store.getStoredTurns(sessionId), sessionId, opts);
 }
 
@@ -102,9 +104,32 @@ export function pageTurns(all: StoredTurn[], sessionId: string, opts: { limit?: 
   return { turns: all.slice(start, end), hasMore: start > 0 };
 }
 
+/**
+ * Throws `UnknownSessionError` (`UNKNOWN_SESSION`) unless the store has
+ * session `sessionId`. Callers check before `runTurn`, which reports an
+ * unknown session as a plain `Error`.
+ */
+export function requireSession(store: ConversationStore, sessionId: string, message = `unknown session ${sessionId}`): void {
+  if (!store.hasSession(sessionId)) throw new UnknownSessionError(sessionId, message);
+}
+
+/**
+ * `turns` of session `sessionId` as stored, with the timestamps `appendTurn`
+ * wrote (CR-8), in the order given. For turns `runTurn` just returned; turns
+ * are never removed, so each is found.
+ */
+export function storedTurns(store: ConversationStore, sessionId: string, turns: ConversationTurn[]): StoredTurn[] {
+  const all = store.getStoredTurns(sessionId);
+  return turns.map((turn) => {
+    const found = turn.sessionId === sessionId ? all.find((t) => t.turnId === turn.turnId) : undefined;
+    if (found === undefined) throw new Error(`turn ${turn.turnId} of session ${turn.sessionId} is not in session ${sessionId}`);
+    return found;
+  });
+}
+
 /** Resume `requested`, or create a new session when it is undefined. Throws `UnknownSessionError`. */
 export function openSession(store: ConversationStore, requested?: string): OpenedSession {
-  if (requested !== undefined && !store.hasSession(requested)) throw new UnknownSessionError(requested, `unknown session ${requested} (conversations live in ${store.dir})`);
+  if (requested !== undefined) requireSession(store, requested, `unknown session ${requested} (conversations live in ${store.dir})`);
   const sessionId = requested ?? store.createSession();
   return { sessionId, resumed: requested !== undefined, turnCount: requested !== undefined ? store.getTurns(sessionId).length : 0 };
 }
