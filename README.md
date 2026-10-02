@@ -83,9 +83,12 @@ bun src/cli.ts --help          # run from source
 bun run build                  # dist/brain single binary for this machine
 ```
 
-Releases: push a tag `vX.Y.Z`; `.github/workflows/release.yml` cross-compiles
-four targets, smoke-tests the Linux binary, and publishes the assets plus
-`install.sh`.
+Releases are driven by the `version` in `package.json`. Merging to `main` a
+change that bumps it makes `.github/workflows/release.yml` tag `vX.Y.Z`,
+cross-compile four targets, smoke-test the Linux binary, and publish the
+assets plus `install.sh`. A merge that leaves the version unchanged releases
+nothing. Pushing a tag `vX.Y.Z` by hand still works, but only when it
+matches `package.json`.
 
 `BRAIN_HOME` (default `~/.brain`) holds all derived state per repo:
 `index.sqlite`, `queue.sqlite`, `proposals.sqlite`, `conversations/`, the
