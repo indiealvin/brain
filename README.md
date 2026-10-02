@@ -41,6 +41,130 @@ brain watch                    # daemon: human sync + integrate loop, keeps embe
 brain watch --install          # …as a user service (systemd --user / launchd); --status, --uninstall
 ```
 
+## What you can do
+
+Your knowledge base is a Git repo of Markdown notes under `knowledge/`.
+You talk; the agent keeps the notes. Everything below works from the
+terminal, and every change is a Git commit you can read and undo.
+
+### Think out loud, and let the agent keep the notes
+
+```console
+$ brain chat
+> I think cheap undo matters more than approval prompts for agents
+So cheap undo turns approval into an after-the-fact review. …
+Knowledge updated · 1 note (1 created)
+```
+
+You get the reply first. The agent then extracts what *you* said, decides
+how it fits your existing notes, and commits the change. The summary line
+appears when that is done. The reply never waits for it. Only your own
+words become knowledge: each claim records the turn it came from
+(`Grounded-in: conversation://<session>/<turn>`), and the assistant's
+replies never count as a source. Relevant notes are pulled into the
+conversation, and the reply cites them by title. `/proposals` lists pending
+proposals and `/quit` (or Ctrl-D) exits.
+
+### Capture a thought without leaving the shell
+
+```bash
+brain chat --once "Idea: weekly review of rejected proposals" --wait
+brain chat --session <id> --once "and also …"     # continue that conversation
+```
+
+`--once` sends one message and prints the reply; `--wait` also prints the
+knowledge summary before exiting. The session id is printed on stderr. Use
+it in scripts, editor commands, or a hotkey.
+
+### Find what you thought before
+
+```console
+$ brain search "agent autonomy"
+0.800  Undo replaces approval  (knowledge/undo-replaces-approval.md)  [lexical=1.00 semantic=1.00]
+```
+
+Hybrid search: full text, embeddings and the link graph. `--limit n` caps
+the results. `--json` gives machine-readable output here and on most other
+commands.
+
+### Review the agent's bigger changes
+
+The agent applies additive changes on its own: new notes, enrichments,
+links, aliases, and additive evolution of an idea. The only automatic
+downgrade is `active` → `tentative`. Anything that removes or reshapes what
+you believe (merge, archive, delete, rename, reconciling a changed position)
+becomes a **proposal** that waits for you:
+
+```bash
+brain proposals list
+brain proposals show <id>          # what it would write or delete, and why
+brain proposals accept <id>        # executes it as one commit
+brain proposals reject <id> --note "these are different ideas"
+```
+
+Rejections are remembered: whenever the agent plans a change to those notes
+again, it sees your rejection (and your note) and is told not to propose the
+same thing. If you edited a note after the proposal was made, rejecting or
+accepting marks the proposal `STALE` instead, and nothing is executed.
+
+### Edit notes yourself, in any editor
+
+Notes are plain Markdown with YAML frontmatter, so you can open the repo in
+Obsidian, VS Code, or vim. `brain sync` (or `brain watch`) commits your edits
+on `main` once the files have been untouched for `sync.quiescence_ms`
+(1.5 s by default, in `brain.toml`). The agent writes in its own worktree
+on the `agent/repo` branch and reaches `main` only by fast-forward. It never
+stashes, resets, or overwrites a file you haven't committed; if your edits
+are in the way, integration waits. Your commits and the agent's are never
+mixed. `AGENTS.md` in the repo describes the note format for other coding
+agents.
+
+### See and undo what the agent did
+
+Every agent commit names its mutation and actor in Git trailers:
+
+```console
+$ git log --grep "Actor: agent" --format='%h %s'
+d3aa936 knowledge: create Undo replaces approval
+$ git show d3aa936                  # Mutation-ID, Mutation-Type, Actor trailers
+$ git revert d3aa936                # undo it like any other commit
+```
+
+The agent's commits, including the proposals you accept, carry
+`Actor: agent`; your edits committed by `brain sync` or `brain watch` carry
+`Actor: human-sync`. A revert is your own commit: the agent rebuilds on top
+of it and the index follows.
+
+### Keep it running in the background
+
+```bash
+brain watch --install              # start at login, restart on failure
+brain watch --status
+brain status                       # heads, queue, pending proposals, index
+brain doctor                       # what's wrong, if anything
+```
+
+Without `brain watch`, nothing runs between commands. After editing notes by
+hand, run `brain integrate`: it commits your edits, brings the agent's branch
+up to date, finishes any queued work, and refreshes the index. (`brain sync`
+only commits your edits.)
+
+### Try it without an API key
+
+```bash
+BRAIN_MODEL_MOCK=1 brain chat      # canned replies, no knowledge extraction
+```
+
+With `embeddings = "hashing"`, search and indexing work fully offline.
+
+### Coming next: Brain for Mac
+
+A native macOS app over `brain rpc --stdio` is in development
+(`docs/mac-app/`). The CLI stays the full product, and the app is a client
+of it.
+
+## The watch daemon
+
 `brain watch` commits your quiescent edits, executes queued mutations,
 fast-forwards `main`, and after every change re-embeds the notes that changed
 so `brain search` and `brain chat` see them without a manual `brain index`.
