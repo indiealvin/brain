@@ -4,7 +4,7 @@
 // Run: bun scripts/spikes/sqlite-lock-spike.ts   (SPIKE_TMP=<dir> to choose the temp root)
 // Exit code 0 when every check passes.
 //
-// Result 2026-09-29, Linux, Bun 1.4.2, SQLite 3.53.2: 23/23 pass. Check A8
+// Result 2026-09-29, Linux, Bun 1.4.2, SQLite 3.53.2: 30/30 pass. Check A8
 // documents a hazard, not a guarantee: a lock connection that nothing
 // references is garbage-collected and its lock released, so lock handles
 // must stay strongly reachable. macOS is not yet verified. Task T0.1 of
@@ -18,6 +18,13 @@ import { join } from "node:path";
 const dir = mkdtempSync(join(process.env.SPIKE_TMP ?? tmpdir(), "lockspike-"));
 const lockFile = join(dir, "worktree.sqlite");
 const dataFile = join(dir, "data.sqlite");
+// Initialize the lock file once, as the lock primitive must: on an empty (0-byte) file every
+// BEGIN IMMEDIATE initializes page 1, which is a write and creates a rollback journal.
+{
+  const init = new Database(lockFile, { create: true });
+  init.exec("PRAGMA user_version = 1");
+  init.close();
+}
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const record = (name: string, ok: boolean, detail = "") => {
   results.push({ name, ok, detail });
@@ -48,7 +55,7 @@ const db = new Database(file, { create: true });
 db.exec("PRAGMA busy_timeout = 0");
 db.exec("BEGIN IMMEDIATE");
 if (mode === "spawn-sleeper") {
-  // Spawn a long-lived child that inherits our fds (like a git subprocess would).
+  // Spawn a long-lived child, like a git subprocess would be. (Whether it inherits the lock fd is not observed here.)
   const c = spawn("sleep", ["30"], { stdio: "inherit", detached: true });
   console.log("SLEEPER " + c.pid);
 }
@@ -108,10 +115,10 @@ async function startHolder(mode = ""): Promise<{ proc: ReturnType<typeof Bun.spa
 {
   const a = open(lockFile, 0);
   const b = open(lockFile, 0);
-  tryBegin(a);
+  const ra = tryBegin(a);
   await sleep(200);
   const rb = tryBegin(b);
-  record("A6 lock survives across awaits in the holder", rb === "SQLITE_BUSY", rb);
+  record("A6 lock survives across awaits in the holder", ra === "ok" && rb === "SQLITE_BUSY", `holder: ${ra}; probe: ${rb}`);
   a.exec("ROLLBACK");
   a.close();
   b.close();
@@ -130,22 +137,30 @@ async function startHolder(mode = ""): Promise<{ proc: ReturnType<typeof Bun.spa
     for (let i = 0; i < 20; i++) { Bun.gc(true); if (tryBegin(probe) === "ok") { leaks++; probe.exec("ROLLBACK"); } await sleep(20); }
   });
   record("A7 withLock shape: held across awaits with forced GC", leaks === 0, `acquired ${leaks}/20`);
-  (() => { const orphan = open(lockFile, 0); tryBegin(orphan); })(); // no reference kept
-  let freed = false;
-  for (let i = 0; i < 20 && !freed; i++) { Bun.gc(true); await sleep(20); if (tryBegin(probe) === "ok") { freed = true; probe.exec("ROLLBACK"); } }
-  record("A8 (hazard) an unreachable lock connection is GC'd and its lock released", freed, freed ? "released by GC — lock handles must stay strongly reachable" : "not released");
   probe.close();
+  // A8 uses its own lock file, so an orphan that is never collected cannot contaminate checks B–H.
+  const orphanFile = join(dir, "orphan.sqlite");
+  { const init = new Database(orphanFile, { create: true }); init.exec("PRAGMA user_version = 1"); init.close(); }
+  const oprobe = open(orphanFile, 0);
+  let orphanGot = "";
+  (() => { const orphan = open(orphanFile, 0); orphanGot = tryBegin(orphan); })(); // no reference kept
+  const heldBeforeGc = tryBegin(oprobe) === "SQLITE_BUSY";
+  record("A8a (setup) the orphan acquired and the probe is BUSY before GC", orphanGot === "ok" && heldBeforeGc, `orphan: ${orphanGot}; busy before GC: ${heldBeforeGc}`);
+  let freed = false;
+  for (let i = 0; i < 20 && !freed; i++) { Bun.gc(true); await sleep(20); if (tryBegin(oprobe) === "ok") { freed = true; oprobe.exec("ROLLBACK"); } }
+  record("A8 (hazard, informational) an unreachable lock connection is GC'd and its lock released", freed, freed ? "released by GC — lock handles must stay strongly reachable" : "not released on this platform (safer; A7 is the guarantee)");
+  oprobe.close();
 }
 
 // B. Bounded wait: busy_timeout 1000 waits ~1 s then BUSY; released within the bound → acquires.
 {
   const a = open(lockFile, 0);
   const b = open(lockFile, 1000);
-  tryBegin(a);
+  const ra = tryBegin(a);
   const t0 = performance.now();
   const rb = tryBegin(b);
   const dt = performance.now() - t0;
-  record("B1 bounded wait: BUSY after ~1 s while held", rb === "SQLITE_BUSY" && dt >= 900 && dt < 2500, `${rb} after ${dt.toFixed(0)} ms`);
+  record("B1 bounded wait: BUSY after ~1 s while held", ra === "ok" && rb === "SQLITE_BUSY" && dt >= 900 && dt < 2500, `holder: ${ra}; ${rb} after ${dt.toFixed(0)} ms`);
   a.exec("ROLLBACK");
   a.close();
   b.close();
@@ -181,20 +196,71 @@ async function startHolder(mode = ""): Promise<{ proc: ReturnType<typeof Bun.spa
   record("C2 cross-process: kernel releases the lock when the holder is SIGKILLed", rb2 === "ok", rb2);
   if (rb2 === "ok") b.exec("ROLLBACK");
   b.close();
-  // C3: a rollback journal may be left behind; it must not block or corrupt the next acquisition.
-  const hot = existsSync(lockFile + "-journal");
+}
+// C3a: a lock-style holder (empty transaction on an initialized lock file) writes nothing and leaves no journal.
+{
+  const holder = await startHolder();
+  holder.proc.kill("SIGKILL");
+  await holder.proc.exited;
+  const journal = existsSync(lockFile + "-journal");
   const c = open(lockFile, 0);
   const rc = tryBegin(c);
-  record("C3 next acquisition after a killed holder is clean", rc === "ok", `${rc}; journal present: ${hot}`);
+  record("C3a lock-style holder killed: no journal left, next acquisition clean", !journal && rc === "ok", `journal: ${journal}; ${rc}`);
   if (rc === "ok") c.exec("ROLLBACK");
   c.close();
 }
+// C3c (informational): on an uninitialized (0-byte) file, even an empty BEGIN IMMEDIATE creates a journal.
+{
+  const raw = join(dir, "uninitialized.sqlite");
+  const u = open(raw, 0);
+  tryBegin(u);
+  const journal = existsSync(raw + "-journal");
+  u.exec("ROLLBACK");
+  u.close();
+  record("C3c (informational) uninitialized lock file: BEGIN IMMEDIATE creates a journal", journal, journal ? "initialize lock files once" : "no journal");
+}
+// C3b: a writer killed after spilling dirty pages leaves a genuinely hot journal; the next BEGIN IMMEDIATE rolls it back.
+{
+  const hotFile = join(dir, "hot.sqlite");
+  const SPILLER = `
+import { Database } from "bun:sqlite";
+const db = new Database(process.argv[2], { create: true });
+db.exec("PRAGMA cache_size = 2"); // force dirty pages to spill into the db file mid-transaction
+db.exec("CREATE TABLE IF NOT EXISTS w (x TEXT)");
+db.exec("INSERT INTO w VALUES ('base')");
+db.exec("BEGIN IMMEDIATE");
+for (let i = 0; i < 2000; i++) db.exec("INSERT INTO w VALUES ('" + "y".repeat(200) + "')");
+(globalThis as any).__db = db;
+console.log("HELD");
+setInterval(() => {}, 1000);
+`;
+  const spillerPath = join(dir, "spiller.ts");
+  await Bun.write(spillerPath, SPILLER);
+  const p = Bun.spawn(["bun", spillerPath, hotFile], { stdout: "pipe" });
+  const reader = p.stdout.getReader();
+  let buf = "";
+  while (!buf.includes("HELD")) buf += new TextDecoder().decode((await reader.read()).value);
+  p.kill("SIGKILL");
+  await p.exited;
+  const j = hotFile + "-journal";
+  const magic = existsSync(j) ? Buffer.from(await Bun.file(j).slice(0, 8).arrayBuffer()).toString("hex") : "";
+  const isHot = magic === "d9d505f920a163d7"; // rollback-journal header magic, written only once pages reach the db file
+  const c = open(hotFile, 0);
+  const rc = tryBegin(c);
+  const gone = !existsSync(j);
+  const rows = rc === "ok" ? (c.query("SELECT COUNT(*) AS n FROM w").get() as { n: number }).n : -1;
+  if (rc === "ok") c.exec("ROLLBACK");
+  const integrity = (c.query("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check;
+  record("C3b hot journal from a killed writer: rolled back by the next BEGIN IMMEDIATE", isHot && rc === "ok" && gone && rows === 1 && integrity === "ok", `hot: ${isHot}; ${rc}; journal removed: ${gone}; rows: ${rows}; integrity: ${integrity}`);
+  c.close();
+}
 
-// D. Inheritance: holder spawns a long-lived child (inherits fds), then holder is SIGKILLed.
+// D. Spawned child: holder spawns a long-lived child (like git), then holder is SIGKILLed.
 {
   const holder = await startHolder("spawn-sleeper");
   const b = open(lockFile, 0);
-  record("D1 holder with spawned child holds the lock", tryBegin(b) === "SQLITE_BUSY");
+  const rd = tryBegin(b);
+  record("D1 holder with spawned child holds the lock", rd === "SQLITE_BUSY", rd);
   holder.proc.kill("SIGKILL");
   await holder.proc.exited;
   let sleeperAlive = false;
@@ -203,7 +269,7 @@ async function startHolder(mode = ""): Promise<{ proc: ReturnType<typeof Bun.spa
     sleeperAlive = true;
   } catch {}
   const rb = tryBegin(b);
-  record("D2 lock released although the spawned child is still alive", rb === "ok" && sleeperAlive, `${rb}; sleeper alive: ${sleeperAlive}`);
+  record("D2 lock released on holder death while a spawned child is still alive", rb === "ok" && sleeperAlive, `${rb}; sleeper alive: ${sleeperAlive}`);
   if (rb === "ok") b.exec("ROLLBACK");
   b.close();
   try {
@@ -288,6 +354,69 @@ console.log("DONE " + v + " " + Date.now());
   record("G1 holder SIGKILLed with two waiters: both run, never together", bothRan && viol === 0, outs.join(" | "));
 }
 
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} passed; bun ${Bun.version}; sqlite ${(new Database(":memory:").query("select sqlite_version() v").get() as { v: string }).v}; ${process.platform}`);
+// H. The shape the implementation must use (design §5.2): busy_timeout = 0 plus async retries.
+{
+  async function acquireAsync(file: string, deadlineMs: number | null): Promise<Database | null> {
+    const db = open(file, 0);
+    const start = Date.now();
+    let backoff = 5;
+    for (;;) {
+      if (tryBegin(db) === "ok") return db;
+      if (deadlineMs !== null && Date.now() - start >= deadlineMs) { db.close(); return null; }
+      await sleep(backoff);
+      backoff = Math.min(50, backoff * 2);
+    }
+  }
+  // H1: the event loop stays responsive while a waiter waits.
+  const holder = await startHolder();
+  let ticks = 0;
+  const t = setInterval(() => ticks++, 10);
+  const t0 = Date.now();
+  const got = await acquireAsync(lockFile, 600);
+  const waited = Date.now() - t0;
+  clearInterval(t);
+  record("H1 bounded async wait gives up at its deadline", got === null && waited >= 600 && waited < 900, `waited ${waited} ms`);
+  record("H2 event loop keeps running while waiting", ticks >= 30, `${ticks} timer ticks in ${waited} ms`);
+  // H3: holder dies mid-wait → the async waiter acquires.
+  const killer = Bun.spawn(["sh", "-c", `sleep 0.3; kill -9 ${holder.proc.pid}`]);
+  const t1 = Date.now();
+  const got2 = await acquireAsync(lockFile, null);
+  record("H3 unbounded async wait acquires after the holder dies", got2 !== null && Date.now() - t1 >= 250, `after ${Date.now() - t1} ms`);
+  got2?.exec("ROLLBACK");
+  got2?.close();
+  await killer.exited;
+  await holder.proc.exited;
+  // H4: cross-process contention using the async shape never admits two holders.
+  const marker = join(dir, "in-cs-h");
+  const ASYNC_WORKER = `
+import { Database } from "bun:sqlite";
+import { openSync, closeSync, unlinkSync } from "node:fs";
+const [file, marker, n] = process.argv.slice(2);
+const db = new Database(file); db.exec("PRAGMA busy_timeout = 0");
+let v = 0;
+for (let i = 0; i < Number(n); i++) {
+  let backoff = 1;
+  for (;;) { try { db.exec("BEGIN IMMEDIATE"); break; } catch (e: any) { if (e?.code !== "SQLITE_BUSY") throw e; await Bun.sleep(backoff); backoff = Math.min(20, backoff * 2); } }
+  try { closeSync(openSync(marker, "wx")); } catch { v++; }
+  await Bun.sleep(1);
+  try { unlinkSync(marker); } catch {}
+  db.exec("ROLLBACK");
+}
+console.log("VIOLATIONS " + v);
+`;
+  const awPath = join(dir, "async-worker.ts");
+  await Bun.write(awPath, ASYNC_WORKER);
+  const procs = Array.from({ length: 4 }, () => Bun.spawn(["bun", awPath, lockFile, marker, "100"], { stdout: "pipe" }));
+  const outs = await Promise.all(procs.map(async (p) => (await new Response(p.stdout).text()).trim()));
+  const total = outs.map((o) => Number(o.match(/VIOLATIONS (\d+)/)?.[1] ?? NaN)).reduce((a, b) => a + b, 0);
+  record("H4 4 processes × 100 async acquisitions: never two in the critical section", total === 0, `violations=${total}`);
+}
+
+const informational = new Set([
+  "A8 (hazard, informational) an unreachable lock connection is GC'd and its lock released",
+  "C3c (informational) uninitialized lock file: BEGIN IMMEDIATE creates a journal",
+]);
+const failed = results.filter((r) => !r.ok && !informational.has(r.name));
+const infoFailed = results.filter((r) => !r.ok && informational.has(r.name)).length;
+console.log(`\n${results.length - failed.length - infoFailed}/${results.length} passed (${failed.length} required failed, ${infoFailed} informational failed); bun ${Bun.version}; sqlite ${(new Database(":memory:").query("select sqlite_version() v").get() as { v: string }).v}; ${process.platform}`);
 process.exit(failed.length === 0 ? 0 : 1);

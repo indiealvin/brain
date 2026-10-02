@@ -552,9 +552,44 @@ ship together.
 
 This contract is enforced the same way `test/fixtures/` enforces the engine.
 
-- `test/rpc/transcripts/*.jsonl`: recorded sessions, one line per message:
-  `{"dir": "c2s" | "s2c", "msg": {…}}`. Volatile values are matched by
-  placeholder: `"<ulid>"`, `"<sha>"`, `"<iso>"`, `"<any>"`.
+- `test/rpc/transcripts/*.jsonl`: recorded sessions.
+  - The first line is a header,
+    `{"asserts": {"notifications": [<type>, …]}}`, listing the notification
+    types the transcript asserts.
+  - Every other line is one of these:
+    - a message, `{"dir": "c2s" | "s2c", "msg": {…}, "match"?: {…}}`;
+    - an out-of-band test step, `{"dir": "test", "step": {…}}`. A step is,
+      for example, spawning or killing another `brain` process,
+      restarting the server under test, or releasing a test hook.
+
+    The Bun harness performs steps. The Swift replay skips them.
+  - `msg` is always the concrete message as recorded, so the Swift replay
+    decodes it with the real types.
+  - Matchers never appear inside `msg`. They live in the optional `match`
+    field, which maps a JSON Pointer inside `msg` to a matcher, and only
+    the Bun harness applies them. The matchers are:
+    - `"<ulid>"`, `"<sha>"`, `"<iso>"`: a value of that form;
+    - `"<any>"`: any value;
+    - `{"$contains": [x, …]}`: the array holds every listed element, and
+      may hold others.
+
+    Without a matcher, a value matches exactly.
+  - `repo.changed.domains` always gets a `$contains` matcher, because one
+    poll can catch several domains, and new domains are additive (§8).
+  - Server messages match as subsets: extra fields are ignored (§2).
+  - Messages of one request match in order. Different requests may
+    interleave in any order (§2).
+  - Notifications match as an unordered multiset within each window. A
+    window runs between consecutive client messages or steps, and the
+    last window runs to the end of the transcript.
+  - The harness sends the next client message, or performs the next step,
+    only after every earlier `s2c` line, including the window's expected
+    notifications, has matched. The last window ends when the server exits
+    after `shutdown`, or at a fixed deadline otherwise.
+  - Notification types not listed in the header are ignored.
+  - The polling types, `repo.changed` and `engine.tick`, match "at least
+    once" rather than an exact count. A window that expects none of them
+    accepts any number.
 - Recorded with `BRAIN_HOME` set to a temp dir and the scripted model
   provider (CR-6), so knowledge runs produce real mutations and
   proposals deterministically.
@@ -565,7 +600,11 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
   - First run: `repo.init`, then `doctor.run`, then `initialize`. Any other
     method before `initialize` returns `NOT_INITIALIZED`.
   - Handshake without a daemon (`loopOwner: "self"`), and with a live
-    `brain watch` (`loopOwner: "other"`, followed by `repo.changed`).
+    `brain watch` (`loopOwner: "other"`). In the with-daemon case, a step
+    then edits a note in the user worktree, the daemon's Human Sync
+    commits it, and a `repo.changed` listing `"git"` follows. An idle
+    daemon tick writes nothing, so without such a step no `repo.changed`
+    is guaranteed.
   - `brain watch` is SIGKILLed while the server has `loopOwner: "other"`.
     Within one interval an `engine.loopOwner` with `"self"` follows. A
     stale `watch.pid` naming a reused pid does not change the result.

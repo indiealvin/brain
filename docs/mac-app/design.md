@@ -201,9 +201,21 @@ and rejected in §15.
     dedicated lock file. `bun:sqlite` is already a dependency. SQLite's POSIX locks are dropped when the process exits, and
     its unix VFS also excludes connections within one process, which
     fixture 3.12 relies on.
-  - Waiters retry on `SQLITE_BUSY` with the existing backoff, and there is
-    no timeout. A hung but live holder blocks everyone, and
+  - **Every wait is asynchronous.** Each lock connection runs with
+    `busy_timeout = 0`. A waiter retries on `SQLITE_BUSY` with the
+    existing async backoff (`src/sync/lock.ts:95–106`). `bun:sqlite` is
+    synchronous, so a non-zero `busy_timeout` would block the whole event
+    loop. For the RPC server that would stall streaming, polling and every
+    other request. The bounded wait of §5.4 is therefore a deadline on the
+    async retries, not a `busy_timeout`.
+  - The worktree lock has no deadline. A hung but live holder blocks everyone, and
     `brain doctor` reports it.
+  - **Initialize each lock file once.** Commit a `PRAGMA user_version = 1`
+    when the file is created. On an empty (0-byte) SQLite file, even an
+    empty `BEGIN IMMEDIATE` initializes page 1. That is a write, so it
+    creates a rollback journal on every acquisition. On an initialized
+    file, an acquisition writes nothing and leaves no journal behind, even
+    when the holder is killed. Both were verified by the spike (C3a, C3c).
   - **Keep lock connections strongly reachable.** If nothing references
     the `Database` that holds the lock, Bun garbage-collects it, which
     closes the connection and releases the lock while the holder is still
@@ -221,8 +233,10 @@ and rejected in §15.
     `busy_timeout = 0`, a bounded wait (`busy_timeout = 1000` gives up at
     ~1002 ms), release on SIGKILL even while a spawned child is still
     alive, and no two holders at once across 4 processes × 150
-    acquisitions. It also verified the `data_version` behavior relied on in
-    §5.3 item 4. **macOS has not been verified yet.** Task T0.1 of the
+    acquisitions. It also verified the async wait shape required above:
+    the event loop stays responsive while waiting, and a deadline is
+    honored. And it verified the `data_version` behavior relied on in §5.3
+    item 4. The spike is `scripts/spikes/sqlite-lock-spike.ts`. **macOS has not been verified yet.** Task T0.1 of the
     implementation plan reruns the spike there.
   - `flock(2)` through FFI is an acceptable alternative, with one
     condition: the lock file must be opened close-on-exec. `flock` locks
