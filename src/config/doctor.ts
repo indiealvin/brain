@@ -16,7 +16,7 @@ import { defaultServiceEnv, describeInstalledService, isCompiledBinary, type Ser
 import { repoPaths, resolveBrainHome } from "../core/brainHome";
 import { queueStateCounts } from "../core/queue";
 import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
-import { refExists, revParse } from "../git/git";
+import { isRepoRoot, NOT_OWN_REPO, refExists, revParse } from "../git/git";
 import { loadConfig } from "../markdown/repo";
 import { createAnthropicClient, DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
@@ -448,6 +448,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
       const config = loadConfig(opts.repoRoot);
       const paths = repoPaths(opts.repoRoot, config.repoId);
       lockCheck = worktreeLockCheck(paths.runtimeDir);
+      if (!isRepoRoot(opts.repoRoot)) throw new Error(NOT_OWN_REPO);
       if (!refExists(opts.repoRoot, MAIN_BRANCH)) throw new Error(`branch ${MAIN_BRANCH} does not exist; run \`brain init\` first`);
       const main = revParse(opts.repoRoot, MAIN_BRANCH);
       const agent = refExists(opts.repoRoot, AGENT_BRANCH) ? revParse(opts.repoRoot, AGENT_BRANCH) : null;

@@ -8,6 +8,12 @@ heading to `## vX.Y.Z — YYYY-MM-DD` in the change that bumps the version.
 
 ## Unreleased
 
+### Fixed
+- A knowledge repo whose `.git` is missing is no longer treated as part of
+  an enclosing Git repository (a dotfiles repo in your home directory, say).
+  `brain` and `brain doctor` now report "not the top level of a git
+  repository" instead of creating the agent branch in that outer repo.
+
 ### Changed
 - A conversation turn whose only change was already in place now reports
   "Knowledge unchanged" instead of listing it as "not applied".

@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
 import type { RepoPaths } from "../core/types";
-import { changedPaths, git, gitOk, isClean, isRepoRoot, refExists, revParse, runGit } from "./git";
+import { assertOwnRepo, changedPaths, git, gitOk, isClean, isRepoRoot, refExists, revParse, runGit } from "./git";
 
 /** Identity used for every agent commit; humans and human-sync commit as themselves. */
 export const AGENT_IDENTITY_ENV = {
@@ -57,6 +57,7 @@ export function resetAgentWorktree(paths: RepoPaths): void {
  */
 export function ensureAgentWorktree(paths: RepoPaths): void {
   const repo = paths.userWorktree;
+  assertOwnRepo(repo);
   if (!refExists(repo, MAIN_BRANCH)) {
     throw new Error(`${repo}: branch ${MAIN_BRANCH} does not exist; run \`brain init\` first`);
   }
