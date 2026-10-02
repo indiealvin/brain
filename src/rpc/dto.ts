@@ -187,5 +187,33 @@ export interface KnowledgeEventData {
 /** `watchTick`'s result (src/cli/watch.ts). */
 export type EngineTick = WatchTickResult;
 
-/** `engine.status`. `lastTick` is set once this server has run a tick (T1.7). */
+/** `engine.status`. `lastTick` is set once this server has run a tick (its loop's, or one asked for with `engine.tick`). */
 export type EngineStatus = EngineInfo & { lastTick?: EngineTick };
+
+// ---------------------------------------------------------------------------
+// engine and change notifications (protocol §5)
+// ---------------------------------------------------------------------------
+
+/** A `repo.changed` domain. `knowledge` (CR-5) is added with the knowledge backlog (T2.5). */
+export type RepoDomain = "git" | "index" | "queue" | "proposals" | "conversations" | "knowledge";
+
+/** `repo.changed`: the domains whose fingerprint component moved since the previous check, and the current values. */
+export interface RepoChanged {
+  /** Non-empty. */
+  domains: RepoDomain[];
+  mainHead: string;
+  agentHead: string;
+  indexedCommit: string | null;
+  /** Advisory: counted on the poll connection, without a staleness refresh. */
+  pendingProposals: number;
+}
+
+/** `engine.humanSync`: the loop's Human Sync watcher committed quiescent edits on `main`. */
+export interface EngineHumanSync {
+  sha: string;
+}
+
+/** `engine.error`: the loop caught an error (redacted). Informational only. */
+export interface EngineError {
+  message: string;
+}

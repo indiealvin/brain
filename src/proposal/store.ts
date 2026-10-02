@@ -126,9 +126,9 @@ export class ProposalStore {
     this.now = opts.now ?? (() => new Date().toISOString());
   }
 
-  /** Insert the proposal as given. No-op when the id already exists. */
-  create(p: Proposal): void {
-    this.db
+  /** Insert the proposal as given. No-op when the id already exists. Returns true when it inserted. */
+  create(p: Proposal): boolean {
+    const r = this.db
       .query(
         `INSERT OR IGNORE INTO proposals (proposal_id, mutation_id, operation, targets_json, writes_json, evidence_json,
            reasoning, created_at, status, resolved_at, decision_note)
@@ -147,6 +147,7 @@ export class ProposalStore {
         p.resolvedAt ?? null,
         p.decisionNote ?? null,
       );
+    return r.changes > 0;
   }
 
   get(id: string): Proposal | undefined {

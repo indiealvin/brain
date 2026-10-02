@@ -8,13 +8,24 @@ heading to `## vX.Y.Z — YYYY-MM-DD` in the change that bumps the version.
 
 ## Unreleased
 
+### Fixed
+- A knowledge repo whose `.git` is missing is no longer treated as part of
+  an enclosing Git repository (a dotfiles repo in your home directory, say).
+  `brain` and `brain doctor` now report "not the top level of a git
+  repository" instead of creating the agent branch in that outer repo.
+
 ### Changed
 - A conversation turn whose only change was already in place now reports
   "Knowledge unchanged" instead of listing it as "not applied".
 
 ### Added
-- `brain rpc --stdio`: `conversation.send` streams the reply and reports each
-  knowledge change as it lands (for the Mac app).
+- `brain rpc --stdio` (for the Mac app):
+  - `conversation.send` streams the reply and reports each knowledge change
+    as it lands;
+  - `proposals.accept` / `proposals.reject`, with `proposals.changed`;
+  - the server runs the watch loop when no `brain watch` owns it, takes it
+    over when `brain watch` exits, and reports changes made by any process
+    as `repo.changed`.
 
 ## v0.2.0 — 2026-10-02
 

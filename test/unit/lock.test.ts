@@ -6,7 +6,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import type { Subprocess } from "bun";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -582,14 +582,17 @@ describe("brain doctor: worktree lock", () => {
       expect(existsSync(stateDir)).toBe(false);
       expect(gitOk(repo.path, "rev-parse", "--verify", "-q", "refs/heads/agent/repo")).toBe(false);
 
-      const broken = makeTempKnowledgeRepo();
-      try {
-        rmSync(join(broken.path, ".git"), { recursive: true, force: true });
-        const r = await runDoctor({ offline: true, repoRoot: broken.path, gitVersion: () => "git version 2.45.0", env: {} });
-        expect(r.checks.find((c) => c.name === "repo")).toMatchObject({ status: "fail", detail: `${broken.path}: branch main does not exist; run \`brain init\` first` });
-      } finally {
-        broken.cleanup();
-      }
+      // A knowledge repo without its own .git, inside a repository that has `main`: git run there
+      // would find the parent's `main`. It is never git-initialized, so no background git process
+      // (auto maintenance after a commit) can race the removal of a .git.
+      const nested = join(repo.path, "nested");
+      mkdirSync(nested);
+      writeFileSync(join(nested, "brain.toml"), readFileSync(join(repo.path, "brain.toml")));
+      const r = await runDoctor({ offline: true, repoRoot: nested, gitVersion: () => "git version 2.45.0", env: {} });
+      expect(r.checks.find((c) => c.name === "repo")).toMatchObject({
+        status: "fail",
+        detail: `${nested}: not the top level of a git repository; run \`brain init\` first`,
+      });
     } finally {
       repo.cleanup();
       bh.cleanup();
@@ -604,6 +607,23 @@ describe("brain doctor: worktree lock", () => {
       expect(report.checks.find((c) => c.name === "worktree lock")).toEqual({ name: "worktree lock", status: "ok", detail: "free", required: false });
     } finally {
       repo.cleanup();
+      bh.cleanup();
+    }
+  });
+});
+
+describe("a knowledge repo without its own .git", () => {
+  test("opening it fails and leaves the enclosing repository alone", async () => {
+    const bh = withBrainHome();
+    const parent = makeTempKnowledgeRepo();
+    try {
+      const nested = join(parent.path, "nested");
+      mkdirSync(nested);
+      writeFileSync(join(nested, "brain.toml"), readFileSync(join(parent.path, "brain.toml")));
+      await expect(openCoordinator(nested)).rejects.toThrow(`${nested}: not the top level of a git repository`);
+      expect(gitOk(parent.path, "rev-parse", "--verify", "-q", "refs/heads/agent/repo")).toBe(false);
+    } finally {
+      parent.cleanup();
       bh.cleanup();
     }
   });

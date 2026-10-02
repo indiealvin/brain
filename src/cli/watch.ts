@@ -13,11 +13,13 @@
  *
  * Only the holder of the repo's loop-owner lock runs the loop (CR-10;
  * docs/mac-app/design.md §5.3 item 2). `waitForLoopOwner` is how
- * `brain watch` gets it.
+ * `brain watch` gets it; the RPC server try-locks instead
+ * (src/rpc/engine.ts). Both then run the same loop, `createWatchLoop`.
  */
-import type { EmbeddingProvider, ExecutionResult, IntegrationResult } from "../core/types";
+import type { BrainConfig, Clock, EmbeddingProvider, ExecutionResult, IntegrationResult, RepoPaths, SyncResult } from "../core/types";
 import type { IndexDb } from "../index/schema";
 import { ensureEmbeddings } from "../retrieval/embeddings";
+import { startHumanSyncWatcher, type HumanSyncWatcher } from "../sync/humanSync";
 import { acquireLock, LOOP_OWNER_LOCK, readLockHolder, type LockHandle, type LockHolderInfo } from "../sync/lock";
 
 export const EMBED_ERROR_LOG_INTERVAL_MS = 60_000;
@@ -105,6 +107,140 @@ export async function watchTick(deps: WatchTickDeps, opts: { force?: boolean } =
   let embedded = 0;
   if (deps.embedder !== null && (changed || opts.force === true)) embedded = await deps.embedder.run();
   return { drained, integration, changed, embedded };
+}
+
+/** What the loop needs from the coordinator: `watchTick`'s calls, plus Human Sync through the coordinator. */
+export interface WatchLoopCoord {
+  readonly paths: RepoPaths;
+  readonly config: BrainConfig;
+  drainQueued(): Promise<ExecutionResult[]>;
+  integrate(): Promise<IntegrationResult>;
+  reconcileIndex(): Promise<unknown>;
+  syncOnce(now?: number): Promise<SyncResult>;
+}
+
+export interface WatchLoopOptions {
+  coord: WatchLoopCoord;
+  /** null → embeddings disabled. */
+  embedder: WatchEmbedder | null;
+  intervalMs: number;
+  log: (line: string) => void;
+  /** Default: the wall clock. */
+  clock?: Clock;
+  /** After every tick that completed: scheduled, forced, or requested through `tick()`. */
+  onTick?: (result: WatchTickResult) => void;
+  /** After a Human Sync pass of the watcher committed (`result.committed`). */
+  onHumanSync?: (result: SyncResult) => void;
+  /** A scheduled or forced tick threw; the loop goes on. Not called for `tick()`, whose caller gets the error. */
+  onError?: (error: unknown) => void;
+}
+
+/** The loop a loop owner runs (design §5.3 item 2): the Human Sync watcher and one `watchTick` per interval. */
+export interface WatchLoop {
+  /**
+   * Start the loop: the Human Sync watcher, whose `sync` is `coord.syncOnce`
+   * (so it goes through the coordinator and its lock, CR-1), a forced tick at
+   * once (design §5.2 continuous recovery: the new loop owner drains, integrates
+   * and embeds whatever is stale), then one tick per interval. Resolves once the
+   * forced tick has finished. A no-op once started or stopped.
+   */
+  start(): Promise<void>;
+  /**
+   * One forced tick outside the schedule (the RPC `engine.tick`). It runs after
+   * the tick in flight, never alongside it (the embedder writes the index outside
+   * the worktree lock), and scheduled ticks are skipped while it runs. Rejects
+   * with the tick's error. Works whether or not the loop is started or stopped.
+   */
+  tick(): Promise<WatchTickResult>;
+  /**
+   * Stop scheduling ticks and Human Sync passes, then wait for the tick and the
+   * Human Sync pass in flight. Idempotent. Ticks requested through `tick()`
+   * afterwards still run.
+   */
+  stop(): Promise<void>;
+}
+
+/**
+ * The loop body shared by `brain watch` and the RPC server (src/rpc/engine.ts),
+ * so both run the same code. The caller holds the loop-owner lock before
+ * calling `start()` and releases it after `stop()` has resolved.
+ *
+ * Ticks never overlap: a scheduled tick is skipped while another is in flight
+ * (the `running` guard of `brain watch`), and a requested one waits for it.
+ */
+export function createWatchLoop(opts: WatchLoopOptions): WatchLoop {
+  const clock = opts.clock ?? { now: () => Date.now() };
+  const deps: WatchTickDeps = { coord: opts.coord, embedder: opts.embedder, log: opts.log };
+  let started = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let watcher: HumanSyncWatcher | null = null;
+  let current: Promise<unknown> | null = null;
+  let syncing: Promise<unknown> | null = null;
+
+  const run = (force: boolean): Promise<WatchTickResult> => {
+    const p = watchTick(deps, { force }).then((r) => {
+      opts.onTick?.(r);
+      return r;
+    });
+    const settled = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    current = settled;
+    void settled.then(() => {
+      if (current === settled) current = null;
+    });
+    return p;
+  };
+  const scheduled = async (force: boolean): Promise<void> => {
+    try {
+      await run(force);
+    } catch (e) {
+      opts.onError?.(e);
+    }
+  };
+
+  return {
+    async start() {
+      if (started || stopped) return;
+      started = true;
+      watcher = startHumanSyncWatcher(opts.coord.paths, opts.coord.config, clock, opts.intervalMs, (now) => {
+        const p = opts.coord.syncOnce(now).then((r) => {
+          if (r.committed) opts.onHumanSync?.(r);
+          return r;
+        });
+        const settled = p.then(
+          () => undefined,
+          () => undefined,
+        );
+        syncing = settled;
+        void settled.then(() => {
+          if (syncing === settled) syncing = null;
+        });
+        return p;
+      });
+      while (current !== null) await current;
+      if (stopped) return;
+      await scheduled(true);
+      if (stopped) return;
+      timer = setInterval(() => {
+        if (current === null && !stopped) void scheduled(false);
+      }, opts.intervalMs);
+    },
+    async tick() {
+      while (current !== null) await current;
+      return run(true);
+    },
+    async stop() {
+      stopped = true;
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+      watcher?.stop();
+      watcher = null;
+      while (current !== null || syncing !== null) await (current ?? syncing);
+    },
+  };
 }
 
 /**

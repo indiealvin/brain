@@ -1,0 +1,31 @@
+{
+  "chat": [{ "response": "Then the approval queue has done its job, and reviewing after the fact is enough." }],
+  "extractor": [
+    {
+      "response": {
+        "candidates": [
+          { "kind": "decision", "claim": "Retire the approval queue now that every agent action is reversible", "groundedSources": ["{{lastUser}}"], "inferences": [] }
+        ]
+      }
+    }
+  ],
+  "planner": [
+    {
+      "response": {
+        "operations": [
+          {
+            "op": "ARCHIVE",
+            "noteIds": ["01JA0000000000000000000001"],
+            "writes": [
+              {
+                "path": "knowledge/approval-queue.md",
+                "content": "---\nid: 01JA0000000000000000000001\ncreated: 2026-09-01\ntype: decision\nstatus: archived\n---\n# Approval queue\n\n## Claim\nEvery agent action waits in the approval queue until I approve it.\n"
+              }
+            ],
+            "reasoning": "the approval queue is retired once agent actions are reversible"
+          }
+        ]
+      }
+    }
+  ]
+}

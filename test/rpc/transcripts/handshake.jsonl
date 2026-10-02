@@ -1,0 +1,15 @@
+{"asserts":{"notifications":["engine.loopOwner","engine.tick","repo.changed"]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z4WT51EM71YZH3SGKHHRCT","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"d81da21088bf390403e8fa53cf0b4ffe64f25118"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"test","step":{"op":"repo.quiescence","repo":"/tmp/brain-transcript/notes","ms":200}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"},"engine":{"intervalMs":100}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z4WT51EM71YZH3SGKHHRCT","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z4WT51EM71YZH3SGKHHRCT","engine":{"loopOwner":"self","intervalMs":100}}},"match":{"/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"tick","method":"engine.tick","params":{}}}
+{"dir":"s2c","msg":{"id":"tick","type":"result","data":{"drained":[],"integration":{"status":"nothing-to-integrate","integratedMutationIds":[],"mainSha":"6f40d151ec6605ba58193251d3ab57a0446535ce"},"changed":false,"embedded":0}},"match":{"/data/integration/mainSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"status","method":"engine.status","params":{}}}
+{"dir":"s2c","msg":{"id":"status","type":"result","data":{"loopOwner":"self","intervalMs":100,"lastTick":{"drained":[],"integration":{"status":"nothing-to-integrate","integratedMutationIds":[],"mainSha":"6f40d151ec6605ba58193251d3ab57a0446535ce"},"changed":false,"embedded":0}}},"match":{"/data/lastTick/integration/mainSha":"<sha>"}}
+{"dir":"test","step":{"op":"repo.writeNote","repo":"/tmp/brain-transcript/notes","path":"knowledge/loop-owner.md","note":{"id":"01JA0000000000000000000001","created":"2026-10-02","type":"idea","title":"Loop owner","sections":{"Claim":"One process per repo runs the loop."}}}}
+{"dir":"s2c","msg":{"type":"repo.changed","data":{"domains":["git"],"mainHead":"d0e2fbffdab5100960d1bd96372e8cfd1459f0b6","agentHead":"6f40d151ec6605ba58193251d3ab57a0446535ce","indexedCommit":"6f40d151ec6605ba58193251d3ab57a0446535ce","pendingProposals":0}},"match":{"/data/domains":{"$contains":["git"]},"/data/mainHead":"<any>","/data/agentHead":"<any>","/data/indexedCommit":"<any>"}}
+{"dir":"s2c","msg":{"type":"engine.tick","data":{"drained":[],"integration":{"status":"rebuilt-and-integrated","integratedMutationIds":[],"mainSha":"d0e2fbffdab5100960d1bd96372e8cfd1459f0b6"},"changed":true,"embedded":1}},"match":{"/data/integration/mainSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

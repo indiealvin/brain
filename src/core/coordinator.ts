@@ -33,8 +33,14 @@
  * same mutation rebuilt, enqueued, executed and integrated; one whose row is
  * `REPLAN` becomes STALE. Every proposal staleness refresh runs that second
  * check too.
+ *
+ * Proposal changes are reported in process (`onProposalsChanged`, outside the
+ * `RepoCoordinator` seam): once per created proposal, and once per locked
+ * section that decided or marked STALE any proposal, after that section.
+ * Only this coordinator's own writes are reported; another process's are not
+ * seen here.
  */
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { AGENT_BRANCH } from "./types";
 import type {
@@ -86,6 +92,30 @@ function crashAfterAcceptForTests(): void {
 }
 
 /**
+ * Test-only hold hook (CR-1, docs/mac-app/design.md §5.2: "a delay or crash
+ * hook used only in tests is acceptable"; implementation-plan T1.6). When set
+ * to a file path, `acceptProposal` and `rejectProposal` stop at the top of
+ * their locked section, before they read the proposal: they write
+ * `<path>.held` (this process's pid) and wait until `<path>` exists. A test
+ * starts this process's decision, waits for `<path>.held`, starts a decision
+ * on the same proposal in another process (which waits for the worktree
+ * lock), then creates `<path>`: this decision enters the critical section
+ * first, whatever the timing. Unset in production.
+ */
+export const DECISION_HOLD_ENV = "BRAIN_TEST_HOLD_DECISION";
+const DECISION_HOLD_POLL_MS = 10;
+
+async function holdDecisionForTests(): Promise<void> {
+  const release = process.env[DECISION_HOLD_ENV];
+  if (!release) return; // test-only, see DECISION_HOLD_ENV
+  writeFileSync(`${release}.held`, String(process.pid));
+  while (!existsSync(release)) await new Promise((r) => setTimeout(r, DECISION_HOLD_POLL_MS));
+}
+
+/** Told the ids of the proposals this process just created, decided or marked STALE (`onProposalsChanged`). */
+export type ProposalsChangedListener = (proposalIds: string[]) => void;
+
+/**
  * The mutation an accepted proposal runs as (§34): its preconditions are the
  * proposal's target snapshots. `acceptProposal` and accept reconciliation
  * (§17 step 6) both build it here, so a reconciled accept runs exactly the
@@ -122,6 +152,9 @@ class Coordinator implements RepoCoordinator {
   private readonly queue: Queue;
   private readonly proposals: ProposalStore;
   private readonly mutex = new Serial();
+  private readonly proposalListeners = new Set<ProposalsChangedListener>();
+  /** Proposals changed by the locked section now running (the mutex runs one at a time); reported when it ends. */
+  private readonly sectionProposalChanges = new Set<string>();
 
   constructor(paths: RepoPaths, config: BrainConfig, queue: Queue, proposals: ProposalStore, clock: Clock) {
     this.paths = paths;
@@ -137,6 +170,8 @@ class Coordinator implements RepoCoordinator {
    * top of a public method, never from inside one: a call from a section that
    * already holds the lock throws `LockReentryError` at once, since it would
    * otherwise wait forever on the mutex that its own caller is running in.
+   * Proposal changes the section made are reported once it ends, also when
+   * it throws, before the next section starts.
    */
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
     try {
@@ -144,7 +179,46 @@ class Coordinator implements RepoCoordinator {
     } catch (e) {
       return Promise.reject(e);
     }
-    return this.mutex.run(() => withRepoWorktreeLock(this.paths.runtimeDir, fn));
+    return this.mutex.run(async () => {
+      try {
+        return await withRepoWorktreeLock(this.paths.runtimeDir, fn);
+      } finally {
+        const changed = [...this.sectionProposalChanges];
+        this.sectionProposalChanges.clear();
+        this.reportProposalsChanged(changed);
+      }
+    });
+  }
+
+  // -- proposal change reports ----------------------------------------------
+
+  /**
+   * Call `listener` whenever this coordinator changes proposals: once per
+   * created proposal (`submitProposal`), and once per locked section that
+   * decided or marked STALE any proposal (an accept, a reject, a staleness
+   * refresh, a drain's accept reconciliation), after that section. Never for
+   * another process's writes. Not part of `RepoCoordinator`; the RPC server
+   * turns it into `proposals.changed` (docs/mac-app/protocol.md §5). Returns
+   * an unsubscribe function.
+   */
+  onProposalsChanged(listener: ProposalsChangedListener): () => void {
+    this.proposalListeners.add(listener);
+    return () => void this.proposalListeners.delete(listener);
+  }
+
+  /** A listener's failure never fails the write it reports. */
+  private reportProposalsChanged(proposalIds: string[]): void {
+    if (proposalIds.length === 0) return;
+    for (const listener of [...this.proposalListeners]) {
+      try {
+        listener(proposalIds);
+      } catch {}
+    }
+  }
+
+  /** Record proposals the running locked section changed. Caller holds the worktree lock. */
+  private proposalsChangedInSection(proposalIds: Iterable<string>): void {
+    for (const id of proposalIds) this.sectionProposalChanges.add(id);
   }
 
   // -- rebuild (§13) --------------------------------------------------------
@@ -351,6 +425,7 @@ class Coordinator implements RepoCoordinator {
       if (this.queue.get(p.mutationId)?.state !== "REPLAN") continue;
       if (this.proposals.decide(p.proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() })) marked.push(p.proposalId);
     }
+    this.proposalsChangedInSection(marked);
     return marked;
   }
 
@@ -400,11 +475,13 @@ class Coordinator implements RepoCoordinator {
    */
   private refreshProposalStaleness(): string[] {
     const pending = this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
+    this.proposalsChangedInSection(pending);
     return [...pending, ...this.staleReplannedAccepts()];
   }
 
+  /** A single insert outside the lock (design §5.2); a new proposal is reported at once. */
   async submitProposal(proposal: Proposal): Promise<void> {
-    this.proposals.create(proposal);
+    if (this.proposals.create(proposal)) this.reportProposalsChanged([proposal.proposalId]);
   }
 
   /**
@@ -433,10 +510,12 @@ class Coordinator implements RepoCoordinator {
    * The ACCEPTED write (`proposals.sqlite`) and the enqueue (`queue.sqlite`)
    * share no transaction. A crash between them is completed by accept
    * reconciliation at the next recovery (§17 step 6); `ACCEPT_CRASH_ENV`
-   * injects that crash in tests.
+   * injects that crash in tests, and `DECISION_HOLD_ENV` holds the decision
+   * at the top of its section.
    */
   async acceptProposal(proposalId: string): Promise<ExecutionResult> {
     return this.exclusive(async () => {
+      await holdDecisionForTests();
       const found = this.proposals.get(proposalId);
       if (!found) throw new UnknownProposalError(proposalId);
       if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
@@ -446,6 +525,7 @@ class Coordinator implements RepoCoordinator {
       if (p.status !== "PENDING" || !this.proposals.decide(proposalId, "PENDING", "ACCEPTED", { resolvedAt: this.nowIso() })) {
         return { mutationId: p.mutationId, state: "REPLAN", error: "STALE" };
       }
+      this.proposalsChangedInSection([proposalId]);
       // A crash here leaves ACCEPTED with no queue row; recovery's accept reconciliation completes it.
       crashAfterAcceptForTests();
       return this.runAcceptedUnlocked(p);
@@ -466,7 +546,7 @@ class Coordinator implements RepoCoordinator {
     const r = await this.executeUnlocked(mutation.mutationId);
     if (r.state === "REPLAN") {
       // The proposal is ACCEPTED and this section holds the lock, so the compare-and-set holds.
-      this.proposals.decide(p.proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() });
+      if (this.proposals.decide(p.proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() })) this.proposalsChangedInSection([p.proposalId]);
       return r;
     }
     if (r.state === "COMMITTED") await this.integrateUnlocked();
@@ -481,12 +561,17 @@ class Coordinator implements RepoCoordinator {
    * PENDING → REJECTED compare-and-set. Throws `ProposalNotPendingError`
    * (with the status found) when the proposal is no longer PENDING —
    * accepted, rejected, or STALE, including marked STALE by this refresh —
-   * and `UnknownProposalError` for an unknown id.
+   * and `UnknownProposalError` for an unknown id. `DECISION_HOLD_ENV` holds
+   * the decision at the top of its section.
    */
   async rejectProposal(proposalId: string, decisionNote?: string): Promise<void> {
     await this.exclusive(async () => {
+      await holdDecisionForTests();
       this.refreshProposalStaleness();
-      if (this.proposals.decide(proposalId, "PENDING", "REJECTED", { decisionNote, resolvedAt: this.nowIso() })) return;
+      if (this.proposals.decide(proposalId, "PENDING", "REJECTED", { decisionNote, resolvedAt: this.nowIso() })) {
+        this.proposalsChangedInSection([proposalId]);
+        return;
+      }
       throw new ProposalNotPendingError(proposalId, this.proposals.get(proposalId)!.status);
     });
   }

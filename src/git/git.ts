@@ -97,6 +97,18 @@ export function isRepoRoot(dir: string): boolean {
   }
 }
 
+/**
+ * Throw unless `repo` is the top level of its own Git repository. Git
+ * commands run in a directory without its own `.git` act on the nearest
+ * enclosing repository (a dotfiles repo in `$HOME`, say), so `agent/repo`
+ * would be created there.
+ */
+export function assertOwnRepo(repo: string): void {
+  if (!isRepoRoot(repo)) throw new Error(`${repo}: ${NOT_OWN_REPO}`);
+}
+
+export const NOT_OWN_REPO = "not the top level of a git repository; run `brain init` first";
+
 /** Blob hash of `path` in `tree` (a commit, tree, or ref), or null when absent. */
 export function blobAt(repo: string, tree: string, path: string): string | null {
   const r = runGit(repo, ["rev-parse", "--verify", "--quiet", `${tree}:${path}`]);

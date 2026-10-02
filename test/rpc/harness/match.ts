@@ -12,6 +12,8 @@
  *   Pointer into `msg` (RFC 6901; "" is the whole message). They replace the
  *   comparison at that pointer:
  *   - `"<ulid>"`, `"<sha>"`, `"<iso>"`: the actual value is a string of that form;
+ *   - `"<id:PREFIX>"` (PREFIX lowercase letters, e.g. `"<id:mut>"`,
+ *     `"<id:prop>"`): a prefixed id `PREFIX_<ULID>` (src/core/ids.ts);
  *   - `"<any>"`: any value at all, including an object or an array;
  *   - `{"$contains": [x, …]}`: the actual value is an array, and each listed
  *     element matches a distinct actual element (by the rules above, without
@@ -24,28 +26,46 @@
  * substitution map from recorded to actual strings:
  * - the transcript header's `tmp` maps to this run's temp root;
  * - a step may add aliases (`StepContext.alias`);
- * - a `<ulid>` or `<sha>` matcher **binds** the recorded value to the actual
- *   one the first time it matches. Later, the same recorded value must meet
- *   the same actual value (at a `<ulid>`/`<sha>` pointer), and two recorded
- *   values must not meet one actual value: relationships between ids and
- *   shas in the recording hold in the replay. `<iso>` never binds.
+ * - a `<ulid>`, `<id:PREFIX>` or `<sha>` matcher **binds** the recorded value
+ *   to the actual one the first time it matches. Later, the same recorded
+ *   value must meet the same actual value (at a binding pointer), and two
+ *   recorded values must not meet one actual value: relationships between
+ *   ids and shas in the recording hold in the replay. `<iso>` never binds.
  * Every string in an expected message and in a client message is rewritten
  * through the map (substring replacement, longest first) before it is
  * compared or sent.
  */
 
-export type FormMatcher = "<ulid>" | "<sha>" | "<iso>" | "<any>";
+/** A prefixed id, `PREFIX_<ULID>`: `mut_…`, `prop_…` (docs/mac-app/protocol.md §7). */
+export type IdMatcher = `<id:${string}>`;
+export type FormMatcher = "<ulid>" | "<sha>" | "<iso>" | "<any>" | IdMatcher;
 export type Matcher = FormMatcher | { $contains: unknown[] };
 export type MatchSpec = Record<string, Matcher>;
 
 export const ULID_RE = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 export const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+/** `PREFIX_<ULID>`; group 1 is the prefix. */
+export const PREFIXED_ID_RE = /^([a-z]+)_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
+const ID_MATCHER_RE = /^<id:([a-z]+)>$/;
 
-const FORMS: Record<Exclude<FormMatcher, "<any>">, RegExp> = { "<ulid>": ULID_RE, "<sha>": SHA_RE, "<iso>": ISO_RE };
+const FORMS: Record<"<ulid>" | "<sha>" | "<iso>", RegExp> = { "<ulid>": ULID_RE, "<sha>": SHA_RE, "<iso>": ISO_RE };
+
+/** The prefix of an `<id:PREFIX>` matcher, or undefined for anything else. */
+function idMatcherPrefix(m: unknown): string | undefined {
+  return typeof m === "string" ? ID_MATCHER_RE.exec(m)?.[1] : undefined;
+}
+
+/** True when `actual` has the form `m` names. */
+function hasForm(m: Exclude<FormMatcher, "<any>">, actual: unknown): boolean {
+  if (typeof actual !== "string") return false;
+  const prefix = idMatcherPrefix(m);
+  if (prefix !== undefined) return PREFIXED_ID_RE.exec(actual)?.[1] === prefix;
+  return FORMS[m as keyof typeof FORMS].test(actual);
+}
 
 export function isMatcher(v: unknown): v is Matcher {
-  if (v === "<ulid>" || v === "<sha>" || v === "<iso>" || v === "<any>") return true;
+  if (v === "<ulid>" || v === "<sha>" || v === "<iso>" || v === "<any>" || idMatcherPrefix(v) !== undefined) return true;
   return typeof v === "object" && v !== null && !Array.isArray(v) && Object.keys(v).length === 1 && Array.isArray((v as { $contains?: unknown }).$contains);
 }
 
@@ -197,9 +217,9 @@ class Walk {
   private matcher(m: Matcher, expected: unknown, actual: unknown, ptr: string): MatchFailure | null {
     if (m === "<any>") return null;
     if (typeof m === "object") return this.contains(m.$contains, actual, ptr);
-    if (typeof actual !== "string" || !FORMS[m].test(actual)) return { pointer: ptr, reason: `expected ${m}, got ${show(actual)}` };
+    if (!hasForm(m, actual)) return { pointer: ptr, reason: `expected ${m}, got ${show(actual)}` };
     if (m === "<iso>" || typeof expected !== "string") return null;
-    return this.bind(expected, actual, ptr);
+    return this.bind(expected, actual as string, ptr);
   }
 
   private bind(recorded: string, actual: string, ptr: string): MatchFailure | null {
@@ -236,7 +256,7 @@ class Walk {
 
 /**
  * Match `actual` against the recorded `expected` message under `match`.
- * Returns null on success, after committing any new `<ulid>`/`<sha>`
+ * Returns null on success, after committing any new `<ulid>`/`<id:…>`/`<sha>`
  * bindings to `subs`; on failure nothing is committed.
  */
 export function matchMessage(expected: unknown, actual: unknown, match: MatchSpec | undefined, subs: Substitutions): MatchFailure | null {
