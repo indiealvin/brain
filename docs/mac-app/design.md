@@ -177,8 +177,13 @@ and rejected in §15.
   - `decide` takes the status it expects to find and updates only if that
     status is still current (`UPDATE … WHERE status = ?`). The allowed
     transitions are PENDING → ACCEPTED / REJECTED / STALE (accept, reject,
-    staleness refresh), and ACCEPTED → STALE only on the accept-then-REPLAN
-    path (`src/core/coordinator.ts:299`).
+    staleness refresh), and ACCEPTED → STALE when the accepted mutation
+    reaches `REPLAN`. That happens either during the accept itself, or
+    later through the accept reconciliation below, which covers
+    invalidation at rebuild (`docs/spec.md` §34 as amended by O1).
+  - `rejectProposal` refreshes staleness first, in the same locked section,
+    so a proposal whose target changed ends up STALE, never REJECTED
+    (I-19).
   - A lost compare-and-set on reject surfaces as `PROPOSAL_NOT_PENDING`.
     On accept it surfaces as the existing `REPLAN` / `"STALE"` result.
 - `openCoordinator` keeps calling `ensureAgentWorktree`, but calls it under
