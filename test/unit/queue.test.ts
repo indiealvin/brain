@@ -129,3 +129,75 @@ describe("queue", () => {
     expect(row.lastError).toBe("PRECONDITION_FAILED: x");
   });
 });
+
+describe("enqueue across processes (CR-1)", () => {
+  const QUEUE_MODULE = join(import.meta.dir, "..", "..", "src", "core", "queue.ts");
+  const PER_PROCESS = 150;
+
+  /** A child that opens the queue, prints READY, waits for `go`, then enqueues PER_PROCESS mutations as fast as it can. */
+  function enqueuer(dbPath: string, go: string, prefix: string): string {
+    return `
+      const { existsSync } = await import("node:fs");
+      const { openQueue } = await import(${JSON.stringify(QUEUE_MODULE)});
+      const q = openQueue(${JSON.stringify(dbPath)});
+      console.log("READY");
+      while (!existsSync(${JSON.stringify(go)})) await new Promise((r) => setTimeout(r, 2));
+      const errors = [];
+      for (let i = 0; i < ${PER_PROCESS}; i++) {
+        const id = ${JSON.stringify(prefix)} + String(i).padStart(4, "0");
+        try {
+          q.enqueue({ mutationId: id, type: "CREATE", summary: id, targets: [{ kind: "absent", slug: id }], writes: [], dependsOn: [], evidence: [] });
+        } catch (e) {
+          errors.push(String((e && e.code) || e));
+        }
+      }
+      q.close();
+      console.log("ERRORS " + errors.length + " " + JSON.stringify([...new Set(errors)]));
+    `;
+  }
+
+  function spawnEnqueuer(script: string) {
+    const proc = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit", stdin: "ignore" });
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let eof = false;
+    const readUntil = async (text: string) => {
+      while (!buf.includes(text) && !eof) {
+        const r = await reader.read();
+        if (r.done) eof = true;
+        else buf += decoder.decode(r.value, { stream: true });
+      }
+      return buf;
+    };
+    return { proc, readUntil, readAll: async () => (await readUntil("\u0000never")) };
+  }
+
+  test(
+    "two processes enqueueing at once both succeed: every row lands once, with consecutive seq numbers",
+    async () => {
+      const dbPath = join(dir, "sub", "queue.sqlite");
+      const go = join(dir, "go");
+      const kids = ["mut_a", "mut_b"].map((prefix) => spawnEnqueuer(enqueuer(dbPath, go, prefix)));
+      try {
+        // Both children have the queue open before either starts writing.
+        for (const k of kids) expect(await k.readUntil("READY")).toContain("READY");
+        await Bun.write(go, "");
+        const outs = await Promise.all(kids.map((k) => k.readAll()));
+        expect(await Promise.all(kids.map((k) => k.proc.exited))).toEqual([0, 0]);
+        expect(outs.map((o) => o.split("\n").find((l) => l.startsWith("ERRORS ")))).toEqual(["ERRORS 0 []", "ERRORS 0 []"]);
+      } finally {
+        for (const k of kids) {
+          try {
+            k.proc.kill("SIGKILL");
+          } catch {}
+        }
+      }
+      const rows = q.list();
+      expect(rows.length).toBe(2 * PER_PROCESS);
+      expect(rows.map((r) => r.seq)).toEqual(Array.from({ length: 2 * PER_PROCESS }, (_, i) => i + 1));
+      expect(new Set(rows.map((r) => r.mutationId)).size).toBe(2 * PER_PROCESS);
+    },
+    60_000,
+  );
+});

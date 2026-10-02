@@ -5,13 +5,18 @@
  * and Anthropic model lookup so unit tests never touch the network. The CLI
  * formats the returned checks; the exit code is 0 iff every *required*
  * check passed. Live checks (OpenRouter `/models`, `/embeddings`; Anthropic
- * `models.retrieve`) are skipped with `offline`.
+ * `models.retrieve`) are skipped with `offline`. The `brain` on `PATH` is
+ * probed locally (`--version`, short timeout), so it runs even with `offline`.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
-import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
+import { accessSync, constants, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import pkg from "../../package.json" with { type: "json" };
+import { defaultServiceEnv, describeInstalledService, isCompiledBinary, type ServiceEnv } from "../cli/service";
 import { repoPaths, resolveBrainHome } from "../core/brainHome";
-import { openCoordinator } from "../core/coordinator";
+import { queueStateCounts } from "../core/queue";
+import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
+import { refExists, revParse } from "../git/git";
 import { loadConfig } from "../markdown/repo";
 import { DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
@@ -40,6 +45,8 @@ export const MIN_GIT_VERSION: readonly [number, number] = [2, 39];
 export const WATCH_PID_FILE = "watch.pid";
 /** A live holder of the worktree lock for longer than this is reported (design §5.2: the lock has no deadline). */
 export const LONG_HELD_LOCK_MS = 10 * 60_000;
+/** `<brain on PATH> --version` gets this long before it is killed and reported (a hung binary never hangs doctor). */
+export const BRAIN_VERSION_PROBE_TIMEOUT_MS = 3_000;
 
 export type CheckStatus = "ok" | "fail" | "warn" | "skip" | "info";
 
@@ -67,6 +74,12 @@ export interface DoctorOptions {
   retrieveModel?: (model: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Injected for tests; default runs `git --version`. */
   gitVersion?: () => string | null;
+  /** Injected for tests; default the first `brain` on `env.PATH` (none when `env` has no `PATH`). */
+  brainOnPath?: () => string | null;
+  /** Injected for tests; default `probeBrainVersion`. Resolves to the output of `<path> --version`; rejects when it fails or hangs. */
+  brainVersion?: (path: string) => Promise<string>;
+  /** Injected for tests; default this process (`runningBrain()`). */
+  running?: RunningBrain;
   configPath?: string;
   timeoutMs?: number;
   /** Injected for tests (platform/home); default: the real machine. Detection is file-existence only, never a shell-out. */
@@ -161,6 +174,85 @@ export function loopOwnerCheck(runtimeDir: string, service: string): DoctorCheck
   return check("ok", `running (${holder.kind}, pid ${holder.pid})`);
 }
 
+/** The `brain` this process is: its version and the file it runs from. */
+export interface RunningBrain {
+  version: string;
+  /** The compiled binary, or `src/cli.ts` when running from source (`bun src/cli.ts`). */
+  path: string;
+}
+
+export function runningBrain(): RunningBrain {
+  return { version: pkg.version, path: isCompiledBinary() ? process.execPath : resolve(import.meta.dir, "..", "cli.ts") };
+}
+
+/** `brain 0.1.4` (the `--version` output) → `0.1.4`; null when the text names no version. */
+export function parseBrainVersion(text: string): string | null {
+  const m = text.match(/\bbrain\s+v?(\d+\.\d+\.\d+\S*)/);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Runs `<path> --version` and resolves to its stdout; rejects on a spawn
+ * error, a non-zero exit, or no answer within `timeoutMs`. The child runs in
+ * its own process group and the whole group is killed on timeout: killing the
+ * child alone would leave a grandchild (a `sleep` in a wrapper script, say)
+ * holding the stdout pipe, and doctor would wait on it.
+ */
+export async function probeBrainVersion(path: string, timeoutMs = BRAIN_VERSION_PROBE_TIMEOUT_MS): Promise<string> {
+  const proc = Bun.spawn([path, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        proc.kill("SIGKILL");
+      }
+      reject(new Error(`no answer within ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+  try {
+    const [out, code] = await Promise.race([Promise.all([new Response(proc.stdout).text(), proc.exited]), hung]);
+    if (code !== 0) throw new Error(`exit code ${code}`);
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sameFile(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mixed versions (docs/mac-app/design.md §5.2, §5.5 item 9): from v0.2.0 on
+ * (CR-1) every `brain` sharing a `BRAIN_HOME` must be the same version. The
+ * first `brain` on `PATH` (`onPath`, null when there is none) is compared with
+ * this process by version string, so running from source compares the same
+ * way. A mismatch, or a `brain` whose version cannot be read, is a warning
+ * and never required: the exit code is unaffected.
+ */
+export async function brainVersionCheck(running: RunningBrain, onPath: string | null, probe: (path: string) => Promise<string>): Promise<DoctorCheck> {
+  const check = (status: CheckStatus, detail: string): DoctorCheck => ({ name: "brain on PATH", status, detail, required: false });
+  const self = `this brain is ${running.version} (${running.path})`;
+  if (onPath === null) return check("info", `not on PATH; ${self}`);
+  if (sameFile(onPath, running.path)) return check("ok", `${onPath} (this brain, ${running.version})`);
+  let out: string;
+  try {
+    out = await probe(onPath);
+  } catch (e) {
+    return check("warn", `\`${onPath} --version\` failed (${errorMessage(e)}), so it may not match: ${self}`);
+  }
+  const version = parseBrainVersion(out);
+  if (version === null) return check("warn", `\`${onPath} --version\` printed no brain version (${JSON.stringify(out.trim().slice(0, 60))}), so it may not match: ${self}`);
+  if (version === running.version) return check("ok", `${onPath} is ${version}, same as this brain (${running.path})`);
+  return check("warn", `${onPath} is ${version} but ${self}; mixed brain versions sharing a BRAIN_HOME are unsupported, so install one version everywhere`);
+}
+
 async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
   const client = new Anthropic({
     apiKey: envOr(env, "ANTHROPIC_API_KEY") || undefined,
@@ -199,6 +291,10 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
     const okVersion = maj > MIN_GIT_VERSION[0] || (maj === MIN_GIT_VERSION[0] && min >= MIN_GIT_VERSION[1]);
     add("git", okVersion ? "ok" : "fail", okVersion ? gv! : `${gv} is older than ${MIN_GIT_VERSION.join(".")}`);
   }
+
+  // --- brain on PATH (mixed versions; local, so it runs under --offline too) ---
+  const onPath = (opts.brainOnPath ?? (() => Bun.which("brain", { PATH: env.PATH ?? "" })))();
+  checks.push(await brainVersionCheck(opts.running ?? runningBrain(), onPath, opts.brainVersion ?? ((p) => probeBrainVersion(p))));
 
   // --- BRAIN_HOME ----------------------------------------------------------
   const home = resolveBrainHome();
@@ -326,29 +422,27 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
   // --- knowledge repo (optional) -----------------------------------------------
   if (opts.repoRoot) {
-    // Probed before opening the coordinator, which may itself wait for this lock.
+    // Read-only: doctor never opens a coordinator. Opening takes the worktree lock (CR-1), which has no
+    // deadline, so doctor would hang behind the very hung holder it is meant to report (design §5.2).
+    // Probing the lock first and opening only when it looks free would still race a holder that takes
+    // it in between (`brain watch` retakes it every tick), so the heads and the queue are read without
+    // the lock: `git rev-parse` and a read-only queue connection. Doctor writes no repo state.
     let lockCheck: DoctorCheck | null = null;
     try {
-      lockCheck = worktreeLockCheck(repoPaths(opts.repoRoot, loadConfig(opts.repoRoot).repoId).runtimeDir);
-    } catch {
-      // not a loadable repo: the coordinator open below reports it
-    }
-    try {
-      const coord = await openCoordinator(opts.repoRoot);
-      try {
-        const [main, agent, rows] = await Promise.all([coord.mainHead(), coord.agentHead(), coord.listMutations()]);
-        const counts: Record<string, number> = {};
-        for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
-        const queue = Object.entries(counts)
-          .map(([s, n]) => `${s}=${n}`)
-          .join(" ");
-        add("repo", "ok", `${opts.repoRoot} (repo_id ${coord.config.repoId})`, false);
-        add("heads", "ok", `main ${main.slice(0, 12)}  agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`, false);
-        add("queue", "ok", queue || "empty", false);
-        checks.push(loopOwnerCheck(coord.paths.runtimeDir, describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service))));
-      } finally {
-        await coord.close();
-      }
+      const config = loadConfig(opts.repoRoot);
+      const paths = repoPaths(opts.repoRoot, config.repoId);
+      lockCheck = worktreeLockCheck(paths.runtimeDir);
+      if (!refExists(opts.repoRoot, MAIN_BRANCH)) throw new Error(`branch ${MAIN_BRANCH} does not exist; run \`brain init\` first`);
+      const main = revParse(opts.repoRoot, MAIN_BRANCH);
+      const agent = refExists(opts.repoRoot, AGENT_BRANCH) ? revParse(opts.repoRoot, AGENT_BRANCH) : null;
+      const queue = queueStateCounts(paths.queueDb)
+        .map(([s, n]) => `${s}=${n}`)
+        .join(" ");
+      add("repo", "ok", `${opts.repoRoot} (repo_id ${config.repoId})`, false);
+      const agentDetail = agent === null ? `agent (none yet; created on first use)` : `agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`;
+      add("heads", "ok", `main ${main.slice(0, 12)}  ${agentDetail}`, false);
+      add("queue", "ok", queue || "empty", false);
+      checks.push(loopOwnerCheck(paths.runtimeDir, describeInstalledService(config.repoId, defaultServiceEnv(opts.service))));
     } catch (e) {
       add("repo", "fail", `${opts.repoRoot}: ${errorMessage(e)}`, false);
     }

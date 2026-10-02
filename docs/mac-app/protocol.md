@@ -89,19 +89,15 @@ protocol and one service layer. The alternative was one-shot
 `brain init --json` / `brain doctor --json` calls. It was rejected because
 the app would then have to parse CLI output as well as the protocol.
 
-When `repoPath` is given, `runDoctor` opens a coordinator
-(`src/config/doctor.ts:264`), and so runs `ensureAgentWorktree`. Before
-`initialize`, that is a short-lived coordinator. It is safe only under
-CR-1, which runs `ensureAgentWorktree` under the lock (`design.md` §5.2).
-After `initialize`, `doctor.run` defaults `repoPath` to the initialized
-repo, and it reuses the server's coordinator through the service layer
-(CR-2) instead of opening a second one. That means `runDoctor` must be
-able to accept an open coordinator, and it must not close a coordinator it
-did not open (today it closes its own in `finally`,
-`src/config/doctor.ts:284`). A `doctor.run` after `initialize` whose
-`repoPath` names a *different* repo opens a short-lived coordinator for
-that repo, as before `initialize`. Its loop-ownership check reads the
-CR-10 side file (`design.md` §5.3 item 2).
+Since T0.4, `runDoctor` opens **no** coordinator, with or without
+`repoPath`. It reads the heads with `git rev-parse` and the queue counts
+read-only. So it never runs `ensureAgentWorktree` and never waits behind a
+held worktree lock, and a hung holder is reported instead of blocking
+doctor (`design.md` §5.2). `doctor.run` therefore needs no coordinator
+before or after `initialize`. After `initialize`, `repoPath` defaults to
+the initialized repo. The loop-ownership check reads the CR-10 lock and its
+side file (`design.md` §5.3 item 2), and the live model check uses T0.9's
+isolated credential mode (T1.3).
 
 ### `initialize`
 

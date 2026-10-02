@@ -29,6 +29,22 @@ import { NoteParseError, parseNote } from "../markdown/parse";
 import { serializeNote } from "../markdown/serialize";
 import { buildNamespace, checkAliasCollision, validateNote } from "../markdown/validate";
 
+/**
+ * Test-only delay hook (CR-1 acceptance test, docs/mac-app/design.md §5.2:
+ * "a delay or crash hook used only in tests is acceptable"). When set to a
+ * positive number of milliseconds, execution sleeps that long between writing
+ * the files into the agent worktree (§12 step 6) and reading them back with
+ * `git status` (step 7). It widens the window in which a second writer could
+ * reset or add to the agent worktree, so a cross-process race that
+ * would otherwise need lucky timing shows up every run. Unset in production.
+ */
+export const EXECUTE_DELAY_ENV = "BRAIN_TEST_EXECUTE_DELAY_MS";
+
+function executeDelayMs(): number {
+  const n = Number(process.env[EXECUTE_DELAY_ENV] ?? "");
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export interface ExecutorContext {
   paths: RepoPaths;
   queue: Queue;
@@ -256,6 +272,8 @@ export async function executeMutation(ctx: ExecutorContext, mutationId: string):
 
   // 6. Apply the materialized patch verbatim.
   applyWrites(wt, mutation.writes);
+  const delay = executeDelayMs();
+  if (delay > 0) await new Promise((r) => setTimeout(r, delay)); // test-only, see EXECUTE_DELAY_ENV
 
   // 7–8. Touched paths; empty diff is NOOP.
   const touched = new Set(statusPorcelain(wt).map((e) => e.path));
