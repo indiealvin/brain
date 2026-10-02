@@ -81,7 +81,9 @@ Environment: `BRAIN_MODEL_PROVIDER` (`anthropic` | `openrouter`; auto-picks
 `BRAIN_EFFORT`, `BRAIN_EMBEDDINGS` (`hashing` | `openrouter`; defaults to
 `openrouter` when the model provider is OpenRouter, `hashing` otherwise),
 `BRAIN_EMBEDDING_MODEL`, `BRAIN_EMBEDDING_DIMS`, `BRAIN_MODEL_MOCK=1` (canned
-model for smoke tests). `brain watch` uses the same embedding settings, so an
+model for smoke tests), `BRAIN_MODEL_SCRIPT=<file>` (tests: chat, extractor and
+planner calls answered from a JSON script, with holds, failures and a call log;
+format in `src/pipeline/scripted.ts`; wins over `BRAIN_MODEL_MOCK`). `brain watch` uses the same embedding settings, so an
 `openrouter` embedder needs `OPENROUTER_API_KEY` (or the key in `config.toml`)
 in the daemon's environment; `hashing` needs nothing. Environment variables override `~/.brain/config.toml`
 (written by `brain setup`; `brain doctor --offline` shows the effective values).

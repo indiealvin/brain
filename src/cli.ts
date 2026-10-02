@@ -41,6 +41,7 @@ import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./m
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
 import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
+import { createModelScriptProvider, MODEL_SCRIPT_ENV, modelScriptPath } from "./pipeline/scripted";
 import { HashingEmbeddingProvider } from "./retrieval/embeddings";
 import { runTurn } from "./pipeline/session";
 import { ensureEmbeddings } from "./retrieval/embeddings";
@@ -92,6 +93,9 @@ options:
 environment:
   BRAIN_HOME           app state and ${USER_CONFIG_FILE_HINT} (default ~/.brain)
   BRAIN_MODEL_MOCK=1   chat without credentials: canned reply, no knowledge extraction
+  BRAIN_MODEL_SCRIPT=<file>
+                       tests: answer chat, extractor and planner calls from a JSON script
+                       (src/pipeline/scripted.ts); wins over BRAIN_MODEL_MOCK
   OPENROUTER_API_KEY, ANTHROPIC_API_KEY, BRAIN_MODEL_PROVIDER, BRAIN_MODEL, BRAIN_EFFORT,
   BRAIN_EMBEDDINGS, BRAIN_EMBEDDING_MODEL, BRAIN_EMBEDDING_DIMS
                        override the config file (environment always wins)
@@ -550,7 +554,22 @@ function hasModelCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
   return ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some((k) => (env[k] ?? "").trim() !== "");
 }
 
+/** A scripted or mock model never touches the network, so it is paired with offline embeddings. */
+function offlineModelRequested(): boolean {
+  return modelScriptPath() !== null || mockModelRequested();
+}
+
+/** `BRAIN_MODEL_SCRIPT` wins over `BRAIN_MODEL_MOCK`; either needs no credentials. */
 function chatModelProvider(io: Io): ModelProvider {
+  const script = modelScriptPath();
+  if (script !== null) {
+    io.err(`${MODEL_SCRIPT_ENV} is set: answering model calls from ${script}`);
+    try {
+      return createModelScriptProvider(script);
+    } catch (e) {
+      throw new CliError(e instanceof Error ? e.message : String(e));
+    }
+  }
   if (mockModelRequested()) {
     io.err("BRAIN_MODEL_MOCK is set: using the mock model (canned reply, no knowledge extraction)");
     return createMockModelProvider();
@@ -676,8 +695,8 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
   const wait = args.flags["wait"] === true;
   const model = chatModelProvider(io);
-  // Mock mode must never touch the network: pair the canned model with offline embeddings.
-  const embeddings = mockModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
+  // Mock and script modes must never touch the network: pair them with offline embeddings.
+  const embeddings = offlineModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
   const { coord } = await openRepo(args.flags);
   const db = openIndex(coord.paths.indexDb);
   const inFlight = new Set<Promise<KnowledgeUpdate>>();
