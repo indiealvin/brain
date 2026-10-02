@@ -210,8 +210,11 @@ bun run build                  # dist/brain single binary for this machine
 Releases are driven by the `version` in `package.json`. Merging to `main` a
 change that bumps it makes `.github/workflows/release.yml` tag `vX.Y.Z`,
 cross-compile four targets, smoke-test the Linux binary, and publish the
-assets plus `install.sh`. A merge that leaves the version unchanged releases
-nothing. Pushing a tag `vX.Y.Z` by hand still works, but only when it
+assets plus `install.sh`, with the version's `CHANGELOG.md` section as the
+release notes. Add changes under "Unreleased" as you go, and rename that
+heading to the version in the change that bumps it: a version without a
+section fails `bun test` and is not released. A merge that leaves the
+version unchanged releases nothing. Pushing a tag `vX.Y.Z` by hand still works, but only when it
 matches `package.json`.
 
 `BRAIN_HOME` (default `~/.brain`) holds all derived state per repo:
