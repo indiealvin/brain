@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 /**
- * `brain` command-line entry point (Phase 11a).
+ * `brain` command-line entry point (Phase 11a): the CLI adapter over the
+ * service layer in src/commands (CR-2; docs/mac-app/design.md §3). This file
+ * keeps what is terminal-specific: argument parsing, repo resolution from
+ * `--repo` / cwd, text rendering, spinners, streaming to stdout, signal
+ * handling, the REPL, interactive `setup`, exit codes and the mapping of
+ * typed errors to `CliError`.
  *
  * Every command except `init` opens the coordinator for the resolved repo,
  * runs crash recovery (spec §17 steps 1–4 via `recover()`, step 5 via
@@ -14,12 +19,18 @@
  */
 import pkg from "../package.json" with { type: "json" };
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { CliError } from "./cli/errors";
 import { installWatchService, uninstallWatchService, watchServiceStatus } from "./cli/service";
 import { createWatchEmbedder, resolveWatchProvider, waitForLoopOwner, watchTick, type WatchEmbedder } from "./cli/watch";
+import { createKnowledgeTracker, openSession, openSessionDeps, type KnowledgeTracker, type OpenedSessionDeps } from "./commands/conversation";
+import { ServiceError } from "./commands/errors";
+import { refreshIndex, search } from "./commands/notes";
+import { proposalsAccept, proposalsGet, proposalsList, proposalsReject } from "./commands/proposals";
+import { chatEmbeddingProvider, chatModelProvider } from "./commands/providers";
+import { findRepoRoot, initRepo, integrate, openRepo, QUEUE_STATES, repoStatus, syncOnce } from "./commands/repo";
 import { formatDoctorReport, runDoctor, WATCH_PID_FILE } from "./config/doctor";
 import {
   applyUserConfigToEnv,
@@ -30,28 +41,18 @@ import {
   type ModelProviderName,
   type UserConfig,
 } from "./config/userConfig";
-import { openConversationStore } from "./conversation/store";
 import { SessionBusyError } from "./conversation/turnLock";
-import { openCoordinator } from "./core/coordinator";
 import { repoPaths } from "./core/brainHome";
-import type { EmbeddingProvider, ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
-import { rebuildIndex } from "./index/reconcile";
-import { noteById } from "./index/queries";
-import { indexedCommitOf, openIndex, type IndexDb } from "./index/schema";
-import { CONFIG_FILE, initKnowledgeRepo, loadConfig } from "./markdown/repo";
-import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./model";
+import type { EmbeddingProvider, Proposal } from "./core/types";
+import { openIndex, type IndexDb } from "./index/schema";
+import { CONFIG_FILE, loadConfig } from "./markdown/repo";
+import { createEmbeddingProvider, DEFAULT_MODEL } from "./model";
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
-import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
-import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
-import { createModelScriptProvider, MODEL_SCRIPT_ENV, modelScriptPath } from "./pipeline/scripted";
+import { formatKnowledgeSummary } from "./pipeline/knowledge";
 import { ProposalNotPendingError, UnknownProposalError } from "./proposal/store";
-import { HashingEmbeddingProvider } from "./retrieval/embeddings";
-import { runTurn } from "./pipeline/session";
-import { ensureEmbeddings } from "./retrieval/embeddings";
-import { hybridSearch } from "./retrieval/hybrid";
-import { fastForwardAgentToMain } from "./git/worktree";
+import { runTurn, type SessionDeps } from "./pipeline/session";
 import { startHumanSyncWatcher } from "./sync/humanSync";
-import { setLockHolderKind, withRepoWorktreeLock } from "./sync/lock";
+import { setLockHolderKind } from "./sync/lock";
 
 const USER_CONFIG_FILE_HINT = "$BRAIN_HOME/config.toml";
 
@@ -164,22 +165,11 @@ function flagInt(flags: ParsedArgs["flags"], name: string, dflt: number): number
   return n;
 }
 
-export { CliError };
+export { CliError, findRepoRoot };
 
 // ---------------------------------------------------------------------------
 // repo resolution
 // ---------------------------------------------------------------------------
-
-/** Walk up from `start` to the first directory containing brain.toml. */
-export function findRepoRoot(start: string): string | null {
-  let dir = resolve(start);
-  for (;;) {
-    if (existsSync(join(dir, CONFIG_FILE))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
 
 function resolveRepo(flags: ParsedArgs["flags"]): string {
   const explicit = flagString(flags, "repo");
@@ -191,44 +181,6 @@ function resolveRepo(flags: ParsedArgs["flags"]): string {
   const found = findRepoRoot(process.cwd());
   if (!found) throw new CliError(`no ${CONFIG_FILE} found in ${process.cwd()} or any parent; run \`brain init\` or pass --repo <dir>`);
   return found;
-}
-
-/**
- * `drainQueued` is implemented by the concrete coordinator (execute every
- * QUEUED mutation, then integrate) but is not part of the read-only
- * `RepoCoordinator` seam, so the CLI checks for it at runtime.
- */
-type Coord = RepoCoordinator & { drainQueued(): Promise<ExecutionResult[]> };
-
-/**
- * Open + recover (§17). Callers must `close()` in a finally.
- *
- * After recovery, when `main` moved ahead of `agent/repo` and the agent branch
- * has nothing un-integrated (zero-pending rebuild, §13), the agent branch is
- * fast-forwarded so the index (step 5) reflects the human's latest commits.
- * `fastForwardAgentToMain` is a no-op otherwise; a real rebuild happens in
- * `integrate`.
- *
- * Each step takes the worktree lock on its own, one after the other (CR-1):
- * `recover()` and `reconcileIndex()` inside the coordinator, the fast-forward
- * here. None of them runs inside another, so the lock is never nested.
- */
-async function openRepo(flags: ParsedArgs["flags"]): Promise<{ coord: Coord; reconciled: ReconcileResult }> {
-  const opened = await openCoordinator(resolveRepo(flags));
-  if (typeof (opened as Partial<Coord>).drainQueued !== "function") {
-    await opened.close();
-    throw new CliError("coordinator does not implement drainQueued()");
-  }
-  const coord = opened as Coord;
-  try {
-    await coord.recover();
-    await withRepoWorktreeLock(coord.paths.runtimeDir, async () => void fastForwardAgentToMain(coord.paths));
-    const reconciled = await coord.reconcileIndex();
-    return { coord, reconciled };
-  } catch (e) {
-    await coord.close();
-    throw e;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,55 +209,32 @@ function short(sha: string): string {
 
 async function cmdInit(args: ParsedArgs, io: Io): Promise<void> {
   const dir = args.positional[0] ?? process.cwd();
-  const r = initKnowledgeRepo(dir);
-  emit(io, { path: r.path, repoId: r.config.repoId, createdConfig: r.createdConfig, createdRepo: r.createdRepo, written: r.written, commitSha: r.commitSha }, () =>
+  const r = initRepo(dir);
+  emit(io, r, () =>
     [
       `${r.createdConfig ? "initialized" : "repaired"} knowledge repo at ${r.path}`,
-      `repo_id: ${r.config.repoId}`,
+      `repo_id: ${r.repoId}`,
       ...(r.written.length ? [`written: ${r.written.join(", ")}`] : []),
       ...(r.commitSha ? [`initial commit: ${short(r.commitSha)}`] : []),
     ].join("\n"),
   );
 }
 
-const QUEUE_STATES: readonly MutationState[] = [
-  "QUEUED",
-  "RUNNING",
-  "COMMITTED",
-  "INTEGRATED",
-  "NOOP",
-  "REPLAN",
-  "BLOCKED",
-  "FAILED_INVALID_EXECUTION",
-  "FAILED",
-];
-
 async function cmdStatus(args: ParsedArgs, io: Io): Promise<void> {
-  const { coord } = await openRepo(args.flags);
+  const { coord } = await openRepo(resolveRepo(args.flags));
   try {
-    const [main, agent, rows, proposals] = await Promise.all([coord.mainHead(), coord.agentHead(), coord.listMutations(), coord.listProposals()]);
-    const queue: Record<string, number> = {};
-    for (const s of QUEUE_STATES) queue[s] = 0;
-    for (const r of rows) queue[r.state] = (queue[r.state] ?? 0) + 1;
-    const pending = proposals.filter((p) => p.status === "PENDING").length;
-    const db = openIndex(coord.paths.indexDb);
-    let indexed: string | null;
-    try {
-      indexed = indexedCommitOf(db);
-    } finally {
-      db.close();
-    }
-    const data = { repo: coord.paths.userWorktree, repoId: coord.config.repoId, stateDir: coord.paths.stateDir, mainHead: main, agentHead: agent, queue, pendingProposals: pending, indexedCommit: indexed };
+    const data = await repoStatus(coord);
+    const { mainHead: main, agentHead: agent, indexedCommit: indexed, queue } = data;
     emit(io, data, () =>
       [
-        `repo:      ${coord.paths.userWorktree}`,
-        `repo_id:   ${coord.config.repoId}`,
-        `state:     ${coord.paths.stateDir}`,
+        `repo:      ${data.repo}`,
+        `repo_id:   ${data.repoId}`,
+        `state:     ${data.stateDir}`,
         `main:      ${short(main)}`,
         `agent:     ${short(agent)}${agent === main ? " (integrated)" : ""}`,
         `indexed:   ${indexed ? short(indexed) : "(none)"}${indexed === agent ? " (current)" : ""}`,
         `queue:     ${QUEUE_STATES.filter((s) => queue[s]! > 0).map((s) => `${s}=${queue[s]}`).join(" ") || "empty"}`,
-        `proposals: ${pending} pending`,
+        `proposals: ${data.pendingProposals} pending`,
       ].join("\n"),
     );
   } finally {
@@ -314,9 +243,9 @@ async function cmdStatus(args: ParsedArgs, io: Io): Promise<void> {
 }
 
 async function cmdSync(args: ParsedArgs, io: Io): Promise<void> {
-  const { coord } = await openRepo(args.flags);
+  const { coord } = await openRepo(resolveRepo(args.flags));
   try {
-    const r = await coord.syncOnce(Date.now());
+    const r = await syncOnce(coord);
     emit(io, r, () => (r.committed ? `committed ${short(r.sha ?? "")} (${r.reason})` : `nothing committed (${r.reason})`));
   } finally {
     await coord.close();
@@ -324,11 +253,11 @@ async function cmdSync(args: ParsedArgs, io: Io): Promise<void> {
 }
 
 async function cmdIntegrate(args: ParsedArgs, io: Io): Promise<void> {
-  const { coord } = await openRepo(args.flags);
+  const { coord } = await openRepo(resolveRepo(args.flags));
   try {
-    const drained = await coord.drainQueued();
-    const r = await coord.integrate();
-    emit(io, { drained, integration: r }, () =>
+    const data = await integrate(coord);
+    const { drained, integration: r } = data;
+    emit(io, data, () =>
       [
         ...(drained.length ? [`executed: ${drained.map((d) => `${d.mutationId}=${d.state}`).join(" ")}`] : []),
         `status: ${r.status}`,
@@ -342,27 +271,16 @@ async function cmdIntegrate(args: ParsedArgs, io: Io): Promise<void> {
 }
 
 async function cmdIndex(args: ParsedArgs, io: Io): Promise<void> {
-  const { coord, reconciled } = await openRepo(args.flags);
+  const { coord, reconciled } = await openRepo(resolveRepo(args.flags));
   try {
-    const rebuild = args.flags["rebuild"] === true;
-    // openRepo already reconciled to agent HEAD (§17 step 5); report that result rather than reconciling twice.
-    const r = rebuild ? await rebuildIndex(coord.paths, await coord.agentHead(), { repoId: coord.config.repoId }) : reconciled;
-    const db = openIndex(coord.paths.indexDb);
-    let embedded: number;
-    let notes: number;
-    try {
-      embedded = await ensureEmbeddings(db, createEmbeddingProvider());
-      notes = (db.query("SELECT COUNT(*) AS n FROM notes").get() as { n: number }).n;
-    } finally {
-      db.close();
-    }
-    emit(io, { ...r, notes, embedded, rebuild }, () =>
+    const r = await refreshIndex(coord, reconciled, { rebuild: args.flags["rebuild"] === true, embeddings: () => createEmbeddingProvider() });
+    emit(io, r, () =>
       [
         `indexed: ${short(r.indexedCommit)}${r.fullRebuild ? " (full rebuild)" : ""}`,
-        `notes: ${notes}`,
+        `notes: ${r.notes}`,
         `changed: ${r.changedPaths.length}`,
         `renames: ${r.renames.length}`,
-        `embedded: ${embedded}`,
+        `embedded: ${r.embedded}`,
       ].join("\n"),
     );
   } finally {
@@ -374,33 +292,23 @@ async function cmdSearch(args: ParsedArgs, io: Io): Promise<void> {
   const query = args.positional.slice(1).join(" ").trim();
   if (query === "") throw new CliError("search: query required", 2);
   const limit = flagInt(args.flags, "limit", 10);
-  const { coord } = await openRepo(args.flags);
+  const { coord } = await openRepo(resolveRepo(args.flags));
   try {
-    const provider = createEmbeddingProvider();
-    const db = openIndex(coord.paths.indexDb);
-    try {
-      await ensureEmbeddings(db, provider);
-      const hits = await hybridSearch(db, provider, query, { limit });
-      const rows = hits.map((h) => {
-        const note = noteById(db, h.noteId);
-        return { noteId: h.noteId, score: h.score, title: note?.title ?? "(unknown)", path: note?.path ?? "", signals: h.signals };
-      });
-      emit(io, { query, hits: rows }, () =>
-        rows.length === 0
-          ? "no results"
-          : rows
-              .map((r) => {
-                const sig = (["lexical", "semantic", "graph"] as const)
-                  .filter((k) => r.signals[k] !== undefined)
-                  .map((k) => `${k}=${r.signals[k]!.toFixed(2)}`)
-                  .join(" ");
-                return `${r.score.toFixed(3)}  ${r.title}  (${r.path})  [${sig}]`;
-              })
-              .join("\n"),
-      );
-    } finally {
-      db.close();
-    }
+    const data = await search(coord, query, { limit, embeddings: createEmbeddingProvider() });
+    const rows = data.hits;
+    emit(io, data, () =>
+      rows.length === 0
+        ? "no results"
+        : rows
+            .map((r) => {
+              const sig = (["lexical", "semantic", "graph"] as const)
+                .filter((k) => r.signals[k] !== undefined)
+                .map((k) => `${k}=${r.signals[k]!.toFixed(2)}`)
+                .join(" ");
+              return `${r.score.toFixed(3)}  ${r.title}  (${r.path})  [${sig}]`;
+            })
+            .join("\n"),
+    );
   } finally {
     await coord.close();
   }
@@ -420,18 +328,17 @@ function proposalCliError(e: unknown): never {
 async function cmdProposals(args: ParsedArgs, io: Io): Promise<void> {
   const sub = args.positional[1] ?? "list";
   const id = args.positional[2];
-  const { coord } = await openRepo(args.flags);
+  const { coord } = await openRepo(resolveRepo(args.flags));
   try {
     switch (sub) {
       case "list": {
-        const all = await coord.listProposals();
+        const all = await proposalsList(coord);
         emit(io, all, () => (all.length === 0 ? "no proposals" : all.map(proposalLine).join("\n")));
         return;
       }
       case "show": {
         if (!id) throw new CliError("proposals show: <id> required", 2);
-        const p = (await coord.listProposals()).find((x) => x.proposalId === id);
-        if (!p) throw new CliError(`unknown proposal ${id}`);
+        const p = await proposalsGet(coord, id).catch(proposalCliError);
         emit(io, p, () =>
           [
             proposalLine(p),
@@ -448,15 +355,15 @@ async function cmdProposals(args: ParsedArgs, io: Io): Promise<void> {
       }
       case "accept": {
         if (!id) throw new CliError("proposals accept: <id> required", 2);
-        const r = await coord.acceptProposal(id).catch(proposalCliError);
+        const r = await proposalsAccept(coord, id).catch(proposalCliError);
         emit(io, r, () => `${id}: ${r.state}${r.commitSha ? ` ${short(r.commitSha)}` : ""}${r.error ? ` (${r.error})` : ""}`);
         return;
       }
       case "reject": {
         if (!id) throw new CliError("proposals reject: <id> required", 2);
         // The PENDING check is the core's compare-and-set (CR-1); a lost one is ProposalNotPendingError.
-        await coord.rejectProposal(id, flagString(args.flags, "note")).catch(proposalCliError);
-        emit(io, { proposalId: id, status: "REJECTED" }, () => `${id}: REJECTED`);
+        const r = await proposalsReject(coord, id, flagString(args.flags, "note")).catch(proposalCliError);
+        emit(io, r, () => `${id}: REJECTED`);
         return;
       }
       default:
@@ -559,7 +466,7 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<number> {
     // `owner` is held until the `finally` below releases it, after the coordinator is closed.
     try {
       io.err(`watch: acquired the loop-owner lock (pid ${process.pid})`);
-      const { coord } = await openRepo({ ...args.flags, repo: repoDir });
+      const { coord } = await openRepo(repoDir);
       const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
       let db: IndexDb | null = null;
       try {
@@ -619,38 +526,6 @@ async function cmdWatch(args: ParsedArgs, io: Io): Promise<number> {
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
-  }
-}
-
-function hasModelCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
-  return ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some((k) => (env[k] ?? "").trim() !== "");
-}
-
-/** A scripted or mock model never touches the network, so it is paired with offline embeddings. */
-function offlineModelRequested(): boolean {
-  return modelScriptPath() !== null || mockModelRequested();
-}
-
-/** `BRAIN_MODEL_SCRIPT` wins over `BRAIN_MODEL_MOCK`; either needs no credentials. */
-function chatModelProvider(io: Io): ModelProvider {
-  const script = modelScriptPath();
-  if (script !== null) {
-    io.err(`${MODEL_SCRIPT_ENV} is set: answering model calls from ${script}`);
-    try {
-      return createModelScriptProvider(script);
-    } catch (e) {
-      throw new CliError(e instanceof Error ? e.message : String(e));
-    }
-  }
-  if (mockModelRequested()) {
-    io.err("BRAIN_MODEL_MOCK is set: using the mock model (canned reply, no knowledge extraction)");
-    return createMockModelProvider();
-  }
-  if (!hasModelCredentials()) throw new CliError("no model configured; run `brain setup`");
-  try {
-    return createModelProvider();
-  } catch (e) {
-    throw new CliError(`${e instanceof Error ? e.message : String(e)}; run \`brain setup\` or \`brain doctor\``);
   }
 }
 
@@ -740,7 +615,7 @@ interface StreamHooks {
 }
 
 /** One turn with the reply streamed to stdout; the spinner runs until the first delta. `--json` never streams. */
-async function streamedTurn(deps: Parameters<typeof runTurn>[0], sessionId: string, text: string, io: Io, hooks: StreamHooks = {}): Promise<Awaited<ReturnType<typeof runTurn>>> {
+async function streamedTurn(deps: SessionDeps, sessionId: string, text: string, io: Io, hooks: StreamHooks = {}): Promise<Awaited<ReturnType<typeof runTurn>>> {
   const spinner = startSpinner("thinking…");
   const writer = replyWriter(io, {
     onFirst: () => {
@@ -780,26 +655,19 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   const once = flagString(args.flags, "once");
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
   const wait = args.flags["wait"] === true;
-  const model = chatModelProvider(io);
+  const model = chatModelProvider({ log: io.err });
   // Mock and script modes must never touch the network: pair them with offline embeddings.
-  const embeddings = offlineModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
-  const { coord } = await openRepo(args.flags);
-  const db = openIndex(coord.paths.indexDb);
-  const inFlight = new Set<Promise<KnowledgeUpdate>>();
+  const embeddings = chatEmbeddingProvider();
+  const { coord } = await openRepo(resolveRepo(args.flags));
+  const inFlight = createKnowledgeTracker();
+  let opened: OpenedSessionDeps | null = null;
   try {
-    await ensureEmbeddings(db, embeddings);
-    const store = openConversationStore(coord.paths.conversationsDir);
-    const requested = flagString(args.flags, "session");
-    if (requested !== undefined && !store.hasSession(requested)) throw new CliError(`unknown session ${requested} (conversations live in ${store.dir})`);
-    const sessionId = requested ?? store.createSession();
-    io.err(`session ${sessionId}${requested ? ` (resumed, ${store.getTurns(sessionId).length} turns)` : ""}`);
-    const deps = { coord, db, model, embeddings, config: coord.config, store };
-
-    const track = <T extends { knowledge: Promise<KnowledgeUpdate> }>(r: T): T => {
-      inFlight.add(r.knowledge);
-      void r.knowledge.finally(() => inFlight.delete(r.knowledge));
-      return r;
-    };
+    opened = await openSessionDeps(coord, { model, embeddings });
+    const { deps } = opened;
+    const session = openSession(deps.store, flagString(args.flags, "session"));
+    const sessionId = session.sessionId;
+    io.err(`session ${sessionId}${session.resumed ? ` (resumed, ${session.turnCount} turns)` : ""}`);
+    const track = inFlight.track;
 
     if (once !== undefined) {
       if (io.json) {
@@ -819,18 +687,13 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
     await chatRepl(deps, sessionId, io, track);
   } finally {
     // Drain before closing: `coord.close()` closes the queue under any in-flight submit().
-    while (inFlight.size > 0) await Promise.all([...inFlight]);
-    db.close();
+    await inFlight.drain();
+    opened?.close();
     await coord.close();
   }
 }
 
-async function chatRepl(
-  deps: Parameters<typeof runTurn>[0],
-  sessionId: string,
-  io: Io,
-  track: <T extends { knowledge: Promise<KnowledgeUpdate> }>(r: T) => T,
-): Promise<void> {
+async function chatRepl(deps: SessionDeps, sessionId: string, io: Io, track: KnowledgeTracker["track"]): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "> ", terminal: process.stdin.isTTY === true });
   io.err("type a message; /proposals lists pending proposals; /quit or Ctrl-D exits");
   let busy: Promise<void> = Promise.resolve();
@@ -867,7 +730,7 @@ async function chatRepl(
       return;
     }
     if (text === "/proposals") {
-      const pending = (await deps.coord.listProposals()).filter((p) => p.status === "PENDING");
+      const pending = await proposalsList(deps.coord, { status: "PENDING" });
       io.out(pending.length === 0 ? "no pending proposals" : pending.map(proposalLine).join("\n"));
       return;
     }
@@ -1137,6 +1000,11 @@ export async function main(argv: string[], io: Io = { out: console.log, err: con
     if (e instanceof CliError) {
       io.err(e.message);
       return e.exitCode;
+    }
+    // The service layer's typed errors (NO_MODEL, UNKNOWN_SESSION, …) are one-line user errors, like CliError.
+    if (e instanceof ServiceError) {
+      io.err(e.message);
+      return 1;
     }
     io.err(`error: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
