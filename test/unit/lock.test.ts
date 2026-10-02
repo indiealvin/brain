@@ -12,8 +12,10 @@ import { join } from "node:path";
 import {
   acquireLock,
   createLockFile,
+  holdsLockInThisChain,
   isLockHeld,
   LockBusyError,
+  LockReentryError,
   lockFilePath,
   lockHolderPath,
   locksDir,
@@ -205,6 +207,58 @@ describe("wait modes", () => {
     });
     expect(outer).toBe("outer");
     expect(isLockHeld(dir, WORKTREE_LOCK)).toBe(false);
+  });
+
+  test("re-entry guard: a nested blocking acquisition in the same call chain throws LockReentryError at once", async () => {
+    const dir = tempDir();
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false);
+    const outer = await withRepoWorktreeLock(dir, async () => {
+      expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(true);
+      await sleep(1); // still the same chain after an await
+      const t0 = Date.now();
+      const nested = await withRepoWorktreeLock(dir, async () => "inner").catch((e: unknown) => e);
+      expect(nested).toBeInstanceOf(LockReentryError);
+      expect((nested as LockReentryError).lock).toBe(WORKTREE_LOCK);
+      await expect(acquireLock(dir, WORKTREE_LOCK, { mode: "blocking" })).rejects.toBeInstanceOf(LockReentryError);
+      // the same runtime dir spelled differently is the same lock
+      await expect(withRepoWorktreeLock(`${dir}/./`, async () => "inner")).rejects.toBeInstanceOf(LockReentryError);
+      expect(Date.now() - t0).toBeLessThan(1_000);
+      // another lock, or the same name under another runtime dir, is not re-entry
+      expect(await withLock(dir, "other", { mode: "blocking" }, async () => "other")).toBe("other");
+      const elsewhere = tempDir();
+      expect(await withRepoWorktreeLock(elsewhere, async () => "elsewhere")).toBe("elsewhere");
+      return "outer";
+    });
+    expect(outer).toBe("outer");
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false);
+    expect(isLockHeld(dir, WORKTREE_LOCK)).toBe(false);
+  });
+
+  test("re-entry guard: independent callers in one process still wait for each other", async () => {
+    const dir = tempDir();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let laterFromInside: Promise<string> | null = null;
+    const a = withRepoWorktreeLock(dir, async () => {
+      order.push("a-start");
+      // A task started inside the section but run after it ends inherits the section's scope; it is
+      // not re-entry once the section is over, so it takes the lock normally.
+      laterFromInside = gate.then(() => withRepoWorktreeLock(dir, async () => (order.push("late"), "late")));
+      await sleep(100);
+      order.push("a-end");
+    });
+    await sleep(10);
+    // a sibling chain started while `a` holds the lock: waits, does not throw
+    const b = withRepoWorktreeLock(dir, async () => {
+      expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(true);
+      order.push("b");
+    });
+    expect(holdsLockInThisChain(dir, WORKTREE_LOCK)).toBe(false); // the caller's own chain holds nothing
+    await Promise.all([a, b]);
+    release();
+    expect(await laterFromInside!).toBe("late");
+    expect(order).toEqual(["a-start", "a-end", "b", "late"]);
   });
 
   test("the event loop stays responsive while a waiter waits, in each mode", async () => {

@@ -17,7 +17,15 @@
  *   `bounded` (a deadline on the async retries) and `try` (one attempt).
  * - **Not re-entrant**, even within one process: a nested acquisition of the
  *   same lock is a second connection, gets `SQLITE_BUSY`, and in blocking
- *   mode waits forever. Callers must never nest a lock.
+ *   mode would wait forever. Callers must never nest a lock. A cheap guard
+ *   turns that silent deadlock into an error: `withLock` records the lock in
+ *   an `AsyncLocalStorage` scope for the duration of `fn`, and a *blocking*
+ *   acquisition of a lock that the same async call chain already holds throws
+ *   `LockReentryError` at once. Independent callers in one process (a sibling
+ *   chain, a timer, another `Serial` task) do not inherit the scope, so they
+ *   still wait for each other (fixture 3.12). `try` and `bounded` waits are
+ *   not guarded: they cannot deadlock, and a nested one simply does not
+ *   acquire.
  * - **Held handles stay strongly reachable.** An unreferenced `Database` is
  *   garbage-collected, which closes it and drops the lock while the holder is
  *   alive. Every held lock is kept in a module-level set until `release()`.
@@ -37,9 +45,10 @@
  *   that died; the next holder overwrites it.
  */
 import { Database } from "bun:sqlite";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /** Lock files live under `<runtimeDir>/locks/`. */
 export const LOCKS_DIR = "locks";
@@ -92,6 +101,51 @@ export class LockBusyError extends Error {
     this.name = "LockBusyError";
     this.lock = lock;
   }
+}
+
+/**
+ * Thrown by a blocking acquisition of a lock that the same async call chain
+ * already holds through `withLock`. Without it the nested wait would never end
+ * (the primitive is not re-entrant).
+ */
+export class LockReentryError extends Error {
+  readonly lock: string;
+  constructor(lock: string) {
+    super(`lock ${JSON.stringify(lock)} is already held by this call chain; locks are not re-entrant, so a nested blocking wait would deadlock`);
+    this.name = "LockReentryError";
+    this.lock = lock;
+  }
+}
+
+/** One `withLock` section: the lock file it holds, and whether `fn` is still running. */
+interface HeldScope {
+  readonly file: string;
+  active: boolean;
+}
+
+/**
+ * The `withLock` sections enclosing the current async call chain. A task that
+ * is started inside a section and outlives it inherits the scope, so `active`
+ * is cleared when the section ends; only sections still running count.
+ */
+const HELD_SCOPES = new AsyncLocalStorage<readonly HeldScope[]>();
+
+function heldInThisChain(file: string): boolean {
+  return (HELD_SCOPES.getStore() ?? []).some((s) => s.active && s.file === file);
+}
+
+/**
+ * True when the current async call chain is inside a `withLock` section that
+ * holds lock `name` (for example inside `withRepoWorktreeLock`). Not a probe of
+ * the lock itself: see `isLockHeld` for that.
+ */
+export function holdsLockInThisChain(runtimeDir: string, name: string): boolean {
+  return heldInThisChain(resolve(lockFilePath(runtimeDir, name)));
+}
+
+/** Throw `LockReentryError` when the current async call chain already holds lock `name`. */
+export function assertLockNotHeldInThisChain(runtimeDir: string, name: string): void {
+  if (holdsLockInThisChain(runtimeDir, name)) throw new LockReentryError(name);
 }
 
 let processHolderKind = "brain";
@@ -241,12 +295,15 @@ class HeldLock implements LockHandle {
 
 /**
  * Acquire lock `name` under `<runtimeDir>/locks/`. Resolves to a held handle,
- * or `null` when a `try` / `bounded` wait does not acquire. Never re-entrant.
+ * or `null` when a `try` / `bounded` wait does not acquire. Never re-entrant:
+ * a `blocking` wait for a lock that this async call chain already holds
+ * through `withLock` rejects with `LockReentryError` instead of waiting forever.
  */
 export function acquireLock(runtimeDir: string, name: string, wait: { mode: "blocking" }, opts?: AcquireOptions): Promise<LockHandle>;
 export function acquireLock(runtimeDir: string, name: string, wait: LockWait, opts?: AcquireOptions): Promise<LockHandle | null>;
 export async function acquireLock(runtimeDir: string, name: string, wait: LockWait, opts: AcquireOptions = {}): Promise<LockHandle | null> {
   const file = lockFilePath(runtimeDir, name);
+  if (wait.mode === "blocking" && heldInThisChain(resolve(file))) throw new LockReentryError(name);
   const deadline = wait.mode === "bounded" ? Date.now() + Math.max(0, wait.timeoutMs) : null;
   ensureLockFile(file, locksDir(runtimeDir));
   const db = openLockConnection(file);
@@ -287,21 +344,27 @@ export async function acquireLock(runtimeDir: string, name: string, wait: LockWa
 
 /**
  * Run `fn` while holding lock `name`; always releases, also when `fn` throws.
- * A `try` or `bounded` wait that does not acquire throws `LockBusyError`.
+ * A `try` or `bounded` wait that does not acquire throws `LockBusyError`; a
+ * `blocking` wait inside a section of the same lock in this async call chain
+ * throws `LockReentryError`. `fn` runs in a scope that records the held lock
+ * for that guard.
  */
 export async function withLock<T>(runtimeDir: string, name: string, wait: LockWait, fn: () => Promise<T>, opts?: AcquireOptions): Promise<T> {
   const handle = await acquireLock(runtimeDir, name, wait, opts);
   if (handle === null) throw new LockBusyError(name);
+  const scope: HeldScope = { file: resolve(lockFilePath(runtimeDir, name)), active: true };
   try {
-    return await fn();
+    return await HELD_SCOPES.run([...(HELD_SCOPES.getStore() ?? []), scope], fn);
   } finally {
+    scope.active = false;
     handle.release();
   }
 }
 
 /**
  * Run `fn` while holding the repo worktree lock (I-11): a blocking wait with
- * no deadline. Not re-entrant: callers must never nest it.
+ * no deadline. Not re-entrant: callers must never nest it, and a nested call
+ * in the same async call chain rejects with `LockReentryError`.
  */
 export function withRepoWorktreeLock<T>(runtimeDir: string, fn: () => Promise<T>): Promise<T> {
   return withLock(runtimeDir, WORKTREE_LOCK, { mode: "blocking" }, fn);

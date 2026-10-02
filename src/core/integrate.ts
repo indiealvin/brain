@@ -1,8 +1,10 @@
 /**
  * Integration (spec §15; I-10, I-11).
  *
- * Entirely under the RepoWorktreeLock: Human Sync first, then a rebuild if
- * `main` moved, then `git merge --ff-only agent/repo` in the user worktree.
+ * The caller holds the RepoWorktreeLock for the whole call: the coordinator
+ * takes it once, at the top of its public method (CR-1), and nothing here
+ * takes it again. Human Sync first, then a rebuild if `main` moved, then
+ * `git merge --ff-only agent/repo` in the user worktree.
  * Git's own overwrite check protects dirty human paths: a refusal is a
  * retry-later, never a state change. Never stash/reset/checkout there.
  */
@@ -13,7 +15,6 @@ import { rebuildAgentBranch } from "./rebuild";
 import { GitError, logGrepTrailer, revParse, runGit } from "../git/git";
 import { isAncestor } from "../git/worktree";
 import { syncOnce } from "../sync/humanSync";
-import { withRepoWorktreeLock } from "../sync/lock";
 
 export interface IntegrateContext {
   paths: RepoPaths;
@@ -46,43 +47,43 @@ export function mainMoved(paths: RepoPaths): boolean {
   return main !== agent && !isAncestor(repo, main, agent);
 }
 
+/** One integration attempt (§15). Must be called under the RepoWorktreeLock; never takes it. */
 export async function integrateOnce(ctx: IntegrateContext): Promise<IntegrationResult> {
   const { paths, config, queue, clock } = ctx;
   const repo = paths.userWorktree;
-  return withRepoWorktreeLock(paths.runtimeDir, async () => {
-    // 1. Quiescent human edits become a human-sync commit first.
-    await syncOnce(paths, config, clock.now());
 
-    // 2. Rebuild when main moved since the agent branch base.
-    let rebuilt = false;
-    if (mainMoved(paths)) {
-      await rebuildAgentBranch({ paths, queue });
-      rebuilt = true;
-    }
+  // 1. Quiescent human edits become a human-sync commit first.
+  await syncOnce(paths, config, clock.now());
 
-    // 3. Nothing beyond main on the agent branch.
-    const main = revParse(repo, MAIN_BRANCH);
-    const agent = revParse(repo, AGENT_BRANCH);
-    if (main === agent) {
-      const ids = markIntegrated(paths, queue);
-      return { status: rebuilt ? "rebuilt-and-integrated" : "nothing-to-integrate", integratedMutationIds: ids, mainSha: main };
-    }
+  // 2. Rebuild when main moved since the agent branch base.
+  let rebuilt = false;
+  if (mainMoved(paths)) {
+    await rebuildAgentBranch({ paths, queue });
+    rebuilt = true;
+  }
 
-    // 4. Fast-forward only, in the user worktree.
-    const args = ["merge", "--ff-only", "-q", AGENT_BRANCH];
-    const r = runGit(repo, args);
-    if (r.code !== 0) {
-      if (REFUSED_DIRTY_RE.test(`${r.stderr}\n${r.stdout}`)) {
-        return { status: "refused-dirty", integratedMutationIds: [], mainSha: main };
-      }
-      throw new GitError(repo, args, r);
-    }
-
-    // 5. Rows now on main are integrated.
-    const newMain = revParse(repo, MAIN_BRANCH);
+  // 3. Nothing beyond main on the agent branch.
+  const main = revParse(repo, MAIN_BRANCH);
+  const agent = revParse(repo, AGENT_BRANCH);
+  if (main === agent) {
     const ids = markIntegrated(paths, queue);
-    // 6. Index reconcile hook.
-    if (ctx.afterIntegrate) await ctx.afterIntegrate();
-    return { status: rebuilt ? "rebuilt-and-integrated" : "integrated", integratedMutationIds: ids, mainSha: newMain };
-  });
+    return { status: rebuilt ? "rebuilt-and-integrated" : "nothing-to-integrate", integratedMutationIds: ids, mainSha: main };
+  }
+
+  // 4. Fast-forward only, in the user worktree.
+  const args = ["merge", "--ff-only", "-q", AGENT_BRANCH];
+  const r = runGit(repo, args);
+  if (r.code !== 0) {
+    if (REFUSED_DIRTY_RE.test(`${r.stderr}\n${r.stdout}`)) {
+      return { status: "refused-dirty", integratedMutationIds: [], mainSha: main };
+    }
+    throw new GitError(repo, args, r);
+  }
+
+  // 5. Rows now on main are integrated.
+  const newMain = revParse(repo, MAIN_BRANCH);
+  const ids = markIntegrated(paths, queue);
+  // 6. Index reconcile hook.
+  if (ctx.afterIntegrate) await ctx.afterIntegrate();
+  return { status: rebuilt ? "rebuilt-and-integrated" : "integrated", integratedMutationIds: ids, mainSha: newMain };
 }
