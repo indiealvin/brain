@@ -47,16 +47,13 @@ jobs:
           GIT_COMMITTER_NAME: ci
           GIT_COMMITTER_EMAIL: ci@example.com
 
-  # The same suite on Git 2.39.x. Xcode Command Line Tools ship 2.39.5
-  # (Apple Git-154), which is below the `brain doctor` floor
-  # (MIN_GIT_VERSION in src/config/doctor.ts); Debian bookworm packages
-  # 2.39.5. The results are the input to the CR-7 decision
-  # (docs/mac-app/design.md §11). continue-on-error keeps the workflow
-  # green while the floor is undecided.
+  # The same suite on Git 2.39.x, the supported floor (MIN_GIT_VERSION in
+  # src/config/doctor.ts; CR-7, docs/mac-app/design.md §11). Xcode Command
+  # Line Tools ship 2.39.5 (Apple Git-154); Debian bookworm packages 2.39.5.
+  # A failure here is a regression on the floor and fails CI.
   test-git-2-39:
     runs-on: ubuntu-latest
     container: debian:bookworm
-    continue-on-error: true
     steps:
       # Before checkout, so actions/checkout clones with git. setup-bun
       # extracts the Bun release with unzip.
