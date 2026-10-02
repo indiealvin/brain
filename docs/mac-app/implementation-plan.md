@@ -75,7 +75,7 @@ instead of restating it, so there is only one source for each test.
 |---|---|---|
 | CR-1 sign-off (design §15) | Approved | O1 still has to land before T0.4 |
 | CR-10 sign-off | Approved | — |
-| CR-7 sign-off; floor chosen from the T0.10a results | Waiting for T0.10a | T0.10b |
+| CR-7 sign-off; floor chosen from the T0.10a results | Approved: floor 2.39 (T0.10a: only the floor constant failed on Git 2.39.5) | — |
 | CR-5 sign-off | Deferred | O2, M2 |
 | Capture session target (design §14.5) | Decided: one per day | — |
 
