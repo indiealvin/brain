@@ -31,6 +31,7 @@ import {
   type UserConfig,
 } from "./config/userConfig";
 import { openConversationStore } from "./conversation/store";
+import { SessionBusyError } from "./conversation/turnLock";
 import { openCoordinator } from "./core/coordinator";
 import type { ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
 import { rebuildIndex } from "./index/reconcile";
@@ -690,6 +691,20 @@ async function streamedTurn(deps: Parameters<typeof runTurn>[0], sessionId: stri
   return r;
 }
 
+/**
+ * `SESSION_BUSY` (CR-9): another writer held the session's turn lock past the
+ * bound, and nothing was appended. `--once` reports it as a one-line error
+ * with exit code 1; the REPL prints the same line and keeps reading.
+ */
+async function sessionBusyAsCliError<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (e) {
+    if (e instanceof SessionBusyError) throw new CliError(e.message);
+    throw e;
+  }
+}
+
 async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   const once = flagString(args.flags, "once");
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
@@ -717,12 +732,12 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
 
     if (once !== undefined) {
       if (io.json) {
-        const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, once)));
+        const r = track(await sessionBusyAsCliError(withSpinner("thinking…", () => runTurn(deps, sessionId, once))));
         const knowledge = await r.knowledge;
         emit(io, { sessionId, reply: r.reply, contextNotes: r.contextNotes, knowledge, summary: formatKnowledgeSummary(knowledge) }, () => "");
         return;
       }
-      const r = track(await streamedTurn(deps, sessionId, once, io));
+      const r = track(await sessionBusyAsCliError(streamedTurn(deps, sessionId, once, io)));
       // never rejects; always awaited before exit
       const knowledge = await withSpinner("updating knowledge…", () => r.knowledge);
       if (wait) io.out(formatKnowledgeSummary(knowledge));
