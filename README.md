@@ -44,6 +44,18 @@ setup`); the `hashing` embedder works offline. `--no-embeddings` turns the
 step off; if the provider cannot be created the daemon logs one warning and
 keeps syncing without embeddings.
 
+One loop runs per repo. It belongs to whoever holds the repo's loop-owner
+lock (`$BRAIN_HOME/repos/<repo_id>/runtime/locks/loop-owner.sqlite`), and
+`brain watch` holds it for as long as it runs. A second `brain watch` for the
+same repo (say, one started by hand while the service is installed) logs once
+which process owns the loop and waits; Ctrl-C ends the wait. It opens the repo
+only when it gets the lock. When the owner exits or is killed, the operating
+system frees the lock, the waiting daemon takes over at once, and it runs one
+full tick straight away. `brain doctor` reports `running (watch, pid N)` from
+that lock, or `not running`. `runtime/watch.pid` is still written once the
+lock is held and removed on a clean stop, but nothing relies on it: after a
+crash it can name a pid that now belongs to another process.
+
 `brain watch --install [--interval ms]` runs the daemon as a per-repo user
 service that starts at login and restarts on failure: a systemd user unit
 (`~/.config/systemd/user/brain-watch@<repo_id>.service`; run

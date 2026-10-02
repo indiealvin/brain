@@ -314,8 +314,8 @@ describe("brain setup / doctor (first-run configuration)", () => {
       expect(d.out).toMatch(/heads\s+main [0-9a-f]{12}\s+agent [0-9a-f]{12}/);
       expect(d.out).toContain("queue");
       expect(d.out).toContain("watch");
-      expect(d.out).toContain("unknown (no ");
-      expect(d.out).toContain("watch.pid");
+      // loop ownership comes from the loop-owner lock (CR-10), which nothing holds here
+      expect(d.out).toMatch(/\[--\]\s+watch\s+not running; /);
       expect(d.out).toMatch(/watch.*not installed/); // service detection is offline (file existence) and this repo_id is fresh
       const missing = run(["doctor", "--offline", "--repo", join(repo, "nope")], { env: { OPENROUTER_API_KEY: KEY } });
       expect(missing.code).toBe(1);
