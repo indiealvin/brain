@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
 import type { RepoPaths } from "../core/types";
-import { git, gitOk, isClean, isRepoRoot, refExists, revParse, runGit } from "./git";
+import { changedPaths, git, gitOk, isClean, isRepoRoot, refExists, revParse, runGit } from "./git";
 
 /** Identity used for every agent commit; humans and human-sync commit as themselves. */
 export const AGENT_IDENTITY_ENV = {
@@ -93,6 +93,29 @@ export function agentHead(paths: RepoPaths): string {
 
 export function mainHead(paths: RepoPaths): string {
   return revParse(paths.userWorktree, MAIN_BRANCH);
+}
+
+/** The paths that differ between `main` and agent HEAD, with the heads they were computed from. */
+export interface PendingIntegration {
+  mainHead: string;
+  agentHead: string;
+  paths: string[];
+}
+
+/**
+ * The paths that differ between `main` and agent HEAD (CR-4,
+ * docs/mac-app/design.md §8): what the Knowledge Browser, which reads at
+ * agent HEAD, shows differently from the user's `main`. Usually agent commits
+ * waiting for integration (I-10); also human commits on `main` that the agent
+ * branch has not caught up with yet. Both heads are resolved first and the
+ * diff runs between those shas, so the three fields describe one snapshot.
+ * Takes no lock: a concurrent integrate can make it stale, and readers
+ * refetch on the next change.
+ */
+export function pendingIntegration(paths: RepoPaths): PendingIntegration {
+  const main = mainHead(paths);
+  const agent = agentHead(paths);
+  return { mainHead: main, agentHead: agent, paths: main === agent ? [] : changedPaths(paths.userWorktree, main, agent) };
 }
 
 /** True when `ancestor` is reachable from `descendant` (or equal). */

@@ -238,7 +238,7 @@ knowledge run still happens.
 |---|---|---|---|---|
 | `conversation.list` | `{}` | — | `SessionSummary[]` | `src/conversation/store.ts:32` |
 | `conversation.create` | `{}` | — | `{sessionId}` | `ConversationStore.createSession` |
-| `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order | `getTurns` / `lastTurns` |
+| `conversation.get` | `{sessionId, limit?=100, beforeTurnId?}` | — | `{turns: TurnDTO[], hasMore: boolean}`. These are the newest `limit` turns before `beforeTurnId`, or before the end of the session, in session order. `hasMore` is true when older turns exist | `getStoredTurns` (CR-8), paged by `conversationTurns`, `src/commands/conversation.ts` |
 | `conversation.send` | `{sessionId, text}` | `reply.delta {text}` | `{turn: TurnDTO, assistantTurn: TurnDTO, contextNotes: ContextNote[]}` | `runTurn`, `src/pipeline/session.ts:88` |
 | `capture.submit` | `{text}` | — | `{sessionId, turn: TurnDTO}` | new, CR-5. The capture joins the current day's capture session, which is created on first use (`design.md` §14.5). `sessionId` in the result names it |
 | `knowledge.backlog` | `{sessionId?}` | — | `SessionBacklog[]` (sessions whose backlog is not empty, or just the given session) | new, CR-5; `design.md` §5.5 item 7 |
@@ -267,6 +267,10 @@ same way as for `conversation.send`.
 Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:90`), `SESSION_BUSY`
 (§2), `NO_MODEL`
 (`src/cli.ts:558`), `MODEL_ERROR` (provider error message, redacted).
+`conversation.get` with a `beforeTurnId` that is not a turn of the session
+returns `INVALID_PARAMS` (`data: {sessionId, beforeTurnId}`). Turns are
+never removed, so a client that pages with ids it was given never gets this
+error.
 
 ### Knowledge
 
@@ -277,7 +281,9 @@ Errors: `UNKNOWN_SESSION` (`src/pipeline/session.ts:90`), `SESSION_BUSY`
 | `notes.get` | `{noteId}` | `NoteDetail` | index + `showFile(agentWorktree, agentHead, path)` |
 
 `notes.get` always reads at agent HEAD (I-23, `design.md` §8). It never
-reads the user worktree file. Error: `UNKNOWN_NOTE`.
+reads the user worktree file. Error: `UNKNOWN_NOTE` (`data: {noteId}`), also
+when the index briefly trails agent HEAD and the note's indexed path is not
+there. The client refetches on the next `repo.changed`.
 
 ### Proposals and mutations
 
@@ -287,7 +293,7 @@ reads the user worktree file. Error: `UNKNOWN_NOTE`.
 | `proposals.get` | `{proposalId}` | `{proposal: Proposal, diff: FileDiff[]}` | Refreshes staleness, then computes the diff (CR-4), both in one CR-1 lock section. This makes the reachability argument below hold |
 | `proposals.accept` | `{proposalId}` | `ExecutionResult` | `acceptProposal`, `src/core/coordinator.ts:275` |
 | `proposals.reject` | `{proposalId, note?}` | `{proposalId, status: "REJECTED"}` | `rejectProposal`, with the compare-and-set of CR-1 (`design.md` §5.2). The PENDING check that is in `src/cli.ts:440` today moves into core |
-| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:155`). The service layer filters, reverses to newest first, and applies the limit |
+| `mutations.list` | `{states?: MutationState[], limit?=100}` | `QueueRow[]` | `listMutations` (`seq` ascending, `src/core/queue.ts:155`). The service layer filters, reverses to newest first, and applies the limit. An empty `states` matches nothing |
 
 When the proposal cannot apply, `proposals.accept` returns
 `state: "REPLAN"`. If the proposal was already stale, `error` is `"STALE"`

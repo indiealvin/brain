@@ -3,6 +3,8 @@
  * protocol sends is a type from src/core/types.ts or the service layer, sent
  * unchanged. Field names here are the wire names.
  */
+import type { WatchTickResult } from "../cli/watch";
+import type { TurnRole } from "../core/types";
 import type { RpcErrorCode } from "./errors";
 
 /** The one protocol version this server speaks (protocol §8). */
@@ -112,3 +114,42 @@ export interface InitializeResult {
   stateDir: string;
   engine: EngineInfo;
 }
+
+// ---------------------------------------------------------------------------
+// read methods (protocol §4, §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The service layer's result types, sent unchanged: `RepoStatus` (cmdStatus
+ * data), `SearchHit`, `NoteDetail`, `ProposalSummary` (a `Proposal` without
+ * `writes`), and the pending-integration paths (CR-4).
+ */
+export type { RepoStatus, PendingIntegration } from "../commands/repo";
+export type { SearchHit, NoteDetail } from "../commands/notes";
+export type { ProposalSummary } from "../commands/proposals";
+
+/**
+ * One turn: `ConversationTurn` (src/core/types.ts) plus the timestamp the
+ * store wrote (CR-8, `StoredTurn`). `knowledge?: KnowledgeTurnState` joins it
+ * with the knowledge backlog (T2.5); until then it is omitted.
+ */
+export interface TurnDTO {
+  sessionId: string;
+  turnId: string;
+  role: TurnRole;
+  text: string;
+  at: string;
+}
+
+/** `conversation.get`: the newest `limit` turns before `beforeTurnId`, in session order. */
+export interface TurnPageDTO {
+  turns: TurnDTO[];
+  /** Older turns exist before `turns[0]`. */
+  hasMore: boolean;
+}
+
+/** `watchTick`'s result (src/cli/watch.ts). */
+export type EngineTick = WatchTickResult;
+
+/** `engine.status`. `lastTick` is set once this server has run a tick (T1.7). */
+export type EngineStatus = EngineInfo & { lastTick?: EngineTick };

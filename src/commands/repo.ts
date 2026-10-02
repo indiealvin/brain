@@ -1,6 +1,7 @@
 /**
  * Service layer, repo and engine (CR-2; docs/mac-app/design.md §3): the open
- * sequence, `init`, `status`, one Human Sync pass and one drain + integrate.
+ * sequence, `init`, `status`, the pending-integration paths (CR-4), one
+ * Human Sync pass and one drain + integrate.
  *
  * Every function returns data. The adapters (src/cli.ts, later src/rpc/)
  * parse arguments, format output and map errors; no behaviour lives in only
@@ -11,7 +12,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { openCoordinator } from "../core/coordinator";
 import type { ExecutionResult, IntegrationResult, MutationState, ReconcileResult, RepoCoordinator, SyncResult } from "../core/types";
-import { fastForwardAgentToMain } from "../git/worktree";
+import { fastForwardAgentToMain, pendingIntegration, type PendingIntegration } from "../git/worktree";
 import { indexedCommitOf, openIndex } from "../index/schema";
 import { CONFIG_FILE, initKnowledgeRepo } from "../markdown/repo";
 import { withRepoWorktreeLock } from "../sync/lock";
@@ -121,7 +122,8 @@ export interface RepoStatus {
   stateDir: string;
   mainHead: string;
   agentHead: string;
-  queue: Record<string, number>;
+  /** A count for every `MutationState` (0 when none), keys in `QUEUE_STATES` order. */
+  queue: Record<MutationState, number>;
   /** Advisory: read without the worktree lock and without a staleness refresh (protocol.md §5). */
   pendingProposals: number;
   indexedCommit: string | null;
@@ -150,8 +152,7 @@ export function pendingProposalCount(proposalsDb: string): number {
 /** Heads, queue counts, the advisory pending-proposal count and the indexed commit. Takes no lock. */
 export async function repoStatus(coord: RepoCoordinator): Promise<RepoStatus> {
   const [main, agent, rows] = await Promise.all([coord.mainHead(), coord.agentHead(), coord.listMutations()]);
-  const queue: Record<string, number> = {};
-  for (const s of QUEUE_STATES) queue[s] = 0;
+  const queue = Object.fromEntries(QUEUE_STATES.map((s) => [s, 0])) as Record<MutationState, number>;
   for (const r of rows) queue[r.state] = (queue[r.state] ?? 0) + 1;
   const pending = pendingProposalCount(coord.paths.proposalsDb);
   const db = openIndex(coord.paths.indexDb);
@@ -163,6 +164,15 @@ export async function repoStatus(coord: RepoCoordinator): Promise<RepoStatus> {
   }
   return { repo: coord.paths.userWorktree, repoId: coord.config.repoId, stateDir: coord.paths.stateDir, mainHead: main, agentHead: agent, queue, pendingProposals: pending, indexedCommit: indexed };
 }
+
+/**
+ * The paths that differ between `main` and agent HEAD, with both heads (CR-4;
+ * `repo.pendingIntegration`, docs/mac-app/protocol.md §4). Takes no lock.
+ */
+export function repoPendingIntegration(coord: RepoCoordinator): PendingIntegration {
+  return pendingIntegration(coord.paths);
+}
+export type { PendingIntegration };
 
 // ---------------------------------------------------------------------------
 // engine: human sync, drain + integrate

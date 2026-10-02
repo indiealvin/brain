@@ -1,0 +1,42 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"c2s","msg":{"id":"init","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes"}}}
+{"dir":"s2c","msg":{"id":"init","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3Z1949GYH60YJ0GPC747ZRC","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"408bd9772d4e77d15eda68fbb48b64b5c2d82a5c"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"initialize","method":"initialize","params":{"protocolVersion":1,"client":{"name":"transcript","version":"1"},"repoPath":"/tmp/brain-transcript/notes","env":{"BRAIN_EMBEDDINGS":"hashing"}}}}
+{"dir":"s2c","msg":{"id":"initialize","type":"result","data":{"protocolVersion":1,"brainVersion":"0.2.0","repoId":"01M3Z1949GYH60YJ0GPC747ZRC","userWorktree":"/tmp/brain-transcript/notes","stateDir":"/tmp/brain-transcript/home/repos/01M3Z1949GYH60YJ0GPC747ZRC","engine":{"loopOwner":"other","intervalMs":1000}}},"match":{"/data/engine":"<any>","/data/brainVersion":"<any>","/data/repoId":"<ulid>"}}
+{"dir":"test","step":{"op":"conversation.seed","repo":"/tmp/brain-transcript/notes","sessionId":"01JA00000000000000000000S1","createdAt":"2026-09-30T08:00:00.000Z","turns":[{"role":"user","text":"Should we ship the migration in one go?","at":"2026-09-30T08:00:05.000Z"},{"role":"assistant","text":"Smaller batches keep each step reversible.","at":"2026-09-30T08:00:09.000Z"},{"role":"user","text":"How small is small?","at":"2026-09-30T08:01:00.000Z"},{"role":"assistant","text":"Small enough that undoing one costs a single revert.","at":"2026-09-30T08:01:04.000Z"},{"role":"user","text":"ok","at":"2026-09-30T08:02:00.000Z"}]}}
+{"dir":"c2s","msg":{"id":"all","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1"}}}
+{"dir":"s2c","msg":{"id":"all","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Should we ship the migration in one go?","at":"2026-09-30T08:00:05.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"Smaller batches keep each step reversible.","at":"2026-09-30T08:00:09.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000003","role":"user","text":"How small is small?","at":"2026-09-30T08:01:00.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000004","role":"assistant","text":"Small enough that undoing one costs a single revert.","at":"2026-09-30T08:01:04.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000005","role":"user","text":"ok","at":"2026-09-30T08:02:00.000Z"}],"hasMore":false}}}
+{"dir":"c2s","msg":{"id":"p1","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":2}}}
+{"dir":"s2c","msg":{"id":"p1","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000004","role":"assistant","text":"Small enough that undoing one costs a single revert.","at":"2026-09-30T08:01:04.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000005","role":"user","text":"ok","at":"2026-09-30T08:02:00.000Z"}],"hasMore":true}}}
+{"dir":"c2s","msg":{"id":"p2","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":2,"beforeTurnId":"000004"}}}
+{"dir":"s2c","msg":{"id":"p2","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"Smaller batches keep each step reversible.","at":"2026-09-30T08:00:09.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000003","role":"user","text":"How small is small?","at":"2026-09-30T08:01:00.000Z"}],"hasMore":true}}}
+{"dir":"c2s","msg":{"id":"p3","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":2,"beforeTurnId":"000002"}}}
+{"dir":"s2c","msg":{"id":"p3","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Should we ship the migration in one go?","at":"2026-09-30T08:00:05.000Z"}],"hasMore":false}}}
+{"dir":"c2s","msg":{"id":"exact","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":3,"beforeTurnId":"000004"}}}
+{"dir":"s2c","msg":{"id":"exact","type":"result","data":{"turns":[{"sessionId":"01JA00000000000000000000S1","turnId":"000001","role":"user","text":"Should we ship the migration in one go?","at":"2026-09-30T08:00:05.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000002","role":"assistant","text":"Smaller batches keep each step reversible.","at":"2026-09-30T08:00:09.000Z"},{"sessionId":"01JA00000000000000000000S1","turnId":"000003","role":"user","text":"How small is small?","at":"2026-09-30T08:01:00.000Z"}],"hasMore":false}}}
+{"dir":"c2s","msg":{"id":"first","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","beforeTurnId":"000001"}}}
+{"dir":"s2c","msg":{"id":"first","type":"result","data":{"turns":[],"hasMore":false}}}
+{"dir":"c2s","msg":{"id":"new","method":"conversation.create","params":{}}}
+{"dir":"s2c","msg":{"id":"new","type":"result","data":{"sessionId":"01M3Z1987C5KZW921Z9TE8GMYK"}},"match":{"/data/sessionId":"<ulid>"}}
+{"dir":"c2s","msg":{"id":"empty","method":"conversation.get","params":{"sessionId":"01M3Z1987C5KZW921Z9TE8GMYK","limit":5}}}
+{"dir":"s2c","msg":{"id":"empty","type":"result","data":{"turns":[],"hasMore":false}}}
+{"dir":"c2s","msg":{"id":"e1","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","beforeTurnId":"000099"}}}
+{"dir":"s2c","msg":{"id":"e1","type":"error","error":{"code":"INVALID_PARAMS","message":"turn 000099 is not in session 01JA00000000000000000000S1","data":{"sessionId":"01JA00000000000000000000S1","beforeTurnId":"000099"}}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e2","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":0}}}
+{"dir":"s2c","msg":{"id":"e2","type":"error","error":{"code":"INVALID_PARAMS","message":"limit must be a positive integer"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e3","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":-1}}}
+{"dir":"s2c","msg":{"id":"e3","type":"error","error":{"code":"INVALID_PARAMS","message":"limit must be a positive integer"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e4","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":1.5}}}
+{"dir":"s2c","msg":{"id":"e4","type":"error","error":{"code":"INVALID_PARAMS","message":"limit must be a positive integer"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e5","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","limit":"2"}}}
+{"dir":"s2c","msg":{"id":"e5","type":"error","error":{"code":"INVALID_PARAMS","message":"limit must be a positive integer"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e6","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S1","beforeTurnId":""}}}
+{"dir":"s2c","msg":{"id":"e6","type":"error","error":{"code":"INVALID_PARAMS","message":"beforeTurnId must be a non-empty string"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e7","method":"conversation.get","params":{"sessionId":"01JA00000000000000000000S9"}}}
+{"dir":"s2c","msg":{"id":"e7","type":"error","error":{"code":"UNKNOWN_SESSION","message":"unknown session 01JA00000000000000000000S9","data":{"sessionId":"01JA00000000000000000000S9"}}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e8","method":"conversation.get","params":{"sessionId":"../../../etc/passwd"}}}
+{"dir":"s2c","msg":{"id":"e8","type":"error","error":{"code":"UNKNOWN_SESSION","message":"unknown session ../../../etc/passwd","data":{"sessionId":"../../../etc/passwd"}}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"e9","method":"conversation.get","params":{}}}
+{"dir":"s2c","msg":{"id":"e9","type":"error","error":{"code":"INVALID_PARAMS","message":"sessionId is required and must be a non-empty string"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"bye","method":"shutdown","params":{}}}
+{"dir":"s2c","msg":{"id":"bye","type":"result","data":{}}}

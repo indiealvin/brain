@@ -3,6 +3,7 @@
  * registers every step handler.
  */
 import "./openrouterStub";
+import "./seed";
 
 export * from "./match";
 export * from "./process";

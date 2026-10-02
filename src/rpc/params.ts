@@ -46,6 +46,31 @@ export function optionalPositiveInt(p: Params, field: string, label = field): nu
   return v;
 }
 
+export function optionalNonNegativeInt(p: Params, field: string, label = field): number | undefined {
+  const v = p[field];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) throw invalidParams(`${label} must be a non-negative integer`);
+  return v;
+}
+
+/** One of `values` (an enum from src/core/types.ts). */
+export function optionalEnum<T extends string>(p: Params, field: string, values: readonly T[]): T | undefined {
+  const v = p[field];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string" || !(values as readonly string[]).includes(v)) throw invalidParams(`${field} must be one of ${values.join(", ")}`);
+  return v as T;
+}
+
+/** An array whose every element is one of `values`. */
+export function optionalEnumArray<T extends string>(p: Params, field: string, values: readonly T[]): T[] | undefined {
+  const v = p[field];
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && (values as readonly string[]).includes(x))) {
+    throw invalidParams(`${field} must be an array of ${values.join(", ")}`);
+  }
+  return v as T[];
+}
+
 /**
  * `initialize.env` / `doctor.run.env`: string values for allowlisted keys
  * only (`ProviderEnvKey`, protocol §3). A key outside the allowlist is
