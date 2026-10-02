@@ -19,7 +19,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { CliError } from "./cli/errors";
 import { installWatchService, uninstallWatchService, watchServiceStatus } from "./cli/service";
-import { createWatchEmbedder, resolveWatchProvider, watchTick, type WatchEmbedder } from "./cli/watch";
+import { createWatchEmbedder, resolveWatchProvider, waitForLoopOwner, watchTick, type WatchEmbedder } from "./cli/watch";
 import { formatDoctorReport, runDoctor, WATCH_PID_FILE } from "./config/doctor";
 import {
   applyUserConfigToEnv,
@@ -31,8 +31,10 @@ import {
   type UserConfig,
 } from "./config/userConfig";
 import { openConversationStore } from "./conversation/store";
+import { SessionBusyError } from "./conversation/turnLock";
 import { openCoordinator } from "./core/coordinator";
-import type { ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
+import { repoPaths } from "./core/brainHome";
+import type { EmbeddingProvider, ExecutionResult, ModelProvider, MutationState, Proposal, ReconcileResult, RepoCoordinator } from "./core/types";
 import { rebuildIndex } from "./index/reconcile";
 import { noteById } from "./index/queries";
 import { indexedCommitOf, openIndex, type IndexDb } from "./index/schema";
@@ -41,13 +43,14 @@ import { createEmbeddingProvider, createModelProvider, DEFAULT_MODEL } from "./m
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, DEFAULT_OPENROUTER_MODEL } from "./model/openrouter";
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
 import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
+import { createModelScriptProvider, MODEL_SCRIPT_ENV, modelScriptPath } from "./pipeline/scripted";
 import { HashingEmbeddingProvider } from "./retrieval/embeddings";
 import { runTurn } from "./pipeline/session";
 import { ensureEmbeddings } from "./retrieval/embeddings";
 import { hybridSearch } from "./retrieval/hybrid";
 import { fastForwardAgentToMain } from "./git/worktree";
 import { startHumanSyncWatcher } from "./sync/humanSync";
-import { withRepoWorktreeLock } from "./sync/lock";
+import { setLockHolderKind, withRepoWorktreeLock } from "./sync/lock";
 
 const USER_CONFIG_FILE_HINT = "$BRAIN_HOME/config.toml";
 
@@ -74,7 +77,8 @@ commands:
   watch [--interval ms] [--no-embeddings]
                                      daemon: human sync + drain/integrate loop until SIGINT;
                                      keeps embeddings fresh after every change (needs the
-                                     OpenRouter key when embeddings=openrouter; hashing is offline)
+                                     OpenRouter key when embeddings=openrouter; hashing is offline);
+                                     one loop per repo: waits while another process owns it
   watch --install [--interval ms]    run the daemon as a user service for this repo
                                      (systemd --user on Linux, launchd on macOS); one unit per repo
   watch --uninstall | --status       stop + remove the service / report whether it is running
@@ -92,6 +96,9 @@ options:
 environment:
   BRAIN_HOME           app state and ${USER_CONFIG_FILE_HINT} (default ~/.brain)
   BRAIN_MODEL_MOCK=1   chat without credentials: canned reply, no knowledge extraction
+  BRAIN_MODEL_SCRIPT=<file>
+                       tests: answer chat, extractor and planner calls from a JSON script
+                       (src/pipeline/scripted.ts); wins over BRAIN_MODEL_MOCK
   OPENROUTER_API_KEY, ANTHROPIC_API_KEY, BRAIN_MODEL_PROVIDER, BRAIN_MODEL, BRAIN_EFFORT,
   BRAIN_EMBEDDINGS, BRAIN_EMBEDDING_MODEL, BRAIN_EMBEDDING_DIMS
                        override the config file (environment always wins)
@@ -482,75 +489,149 @@ function cmdWatchService(args: ParsedArgs, io: Io): number {
  * `brain watch`: human-sync watcher + one `watchTick` per interval (drain,
  * integrate, refresh embeddings when something changed). The embedding
  * provider is created once; if that fails the daemon runs without embeddings.
+ *
+ * Loop ownership (CR-10; docs/mac-app/design.md §5.3 item 2): only the holder
+ * of the repo's loop-owner lock runs the loop. The daemon waits for the lock
+ * before it opens the repo, holds it for its whole life and releases it last.
+ * While another process holds it, the daemon logs who (once) and keeps
+ * waiting; SIGINT / SIGTERM end the wait. The lock is kernel-released, so a
+ * SIGKILLed owner is taken over at once.
+ *
+ * The repo is opened only after the lock is acquired, for three reasons:
+ * - a waiting daemon touches no repo state: today's open sequence
+ *   (`ensureAgentWorktree`, `recover()`) can reset the agent worktree, and it
+ *   must not do that under a live loop owner (design §5.1);
+ * - recovery runs when the daemon takes over, which is exactly when a
+ *   SIGKILLed previous owner may have left a dirty agent worktree or a
+ *   `RUNNING` row, not hours earlier when the wait began;
+ * - it follows the lock order (design §5.2): loop owner, then worktree, which
+ *   the open sequence takes.
+ * Repo and `brain.toml` errors still surface before waiting.
+ *
+ * Whoever acquires the lock runs a forced tick at once (design §5.2,
+ * continuous recovery). `watch.pid` is kept for compatibility only: written
+ * after the lock is acquired and removed on a clean stop, while the lock is
+ * still held. Nothing reads it to decide anything; `brain doctor` reads the
+ * lock and its side file.
  */
 async function cmdWatch(args: ParsedArgs, io: Io): Promise<number> {
   if (args.flags["install"] === true || args.flags["uninstall"] === true || args.flags["status"] === true) return cmdWatchService(args, io);
   const intervalMs = flagInt(args.flags, "interval", 1000);
-  const { coord } = await openRepo(args.flags);
-  const clock = { now: () => Date.now() };
-  // `brain doctor` reads this to tell whether a daemon is running for the repo.
-  const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
-  try {
-    mkdirSync(coord.paths.runtimeDir, { recursive: true });
-    writeFileSync(pidFile, `${process.pid}\n`);
-  } catch (e) {
-    io.err(`warning: cannot write ${pidFile}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  let db: IndexDb | null = null;
-  let embedder: WatchEmbedder | null = null;
-  if (args.flags["no-embeddings"] === true) io.err("watch: embeddings disabled (--no-embeddings)");
-  else {
-    const provider = resolveWatchProvider(() => createEmbeddingProvider(), io.err);
-    if (provider !== null) {
-      db = openIndex(coord.paths.indexDb);
-      embedder = createWatchEmbedder({ db, provider, log: io.err });
-    }
-  }
-  io.err(`watching ${coord.paths.userWorktree} (interval ${intervalMs}ms); Ctrl-C to stop`);
-  const syncWatcher = startHumanSyncWatcher(coord.paths, coord.config, clock, intervalMs, async (now) => {
-    const r = await coord.syncOnce(now);
-    if (r.committed) io.err(`human sync: committed ${short(r.sha ?? "")}`);
-    return r;
+  const repoDir = resolveRepo(args.flags);
+  const runtimeDir = repoPaths(repoDir, loadConfig(repoDir).repoId).runtimeDir;
+  setLockHolderKind("watch"); // every lock this process holds names it as `watch` in the side file
+
+  // One handler for the whole command: while waiting it ends the wait, once running it stops the loop.
+  // It unregisters itself, so a second signal terminates at once (the kernel releases the locks).
+  let stopping = false;
+  let wake!: () => void;
+  const stopped = new Promise<void>((r) => {
+    wake = r;
   });
-  const deps = { coord, embedder, log: io.err };
-  let running = false;
-  const tick = async (force: boolean) => {
-    if (running) return;
-    running = true;
-    try {
-      await watchTick(deps, { force });
-    } catch (e) {
-      io.err(`watch loop error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      running = false;
-    }
+  const onSignal = () => {
+    stopping = true;
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    wake();
   };
-  await tick(true); // startup: embed whatever the recovery reconcile left stale
-  const loop = setInterval(() => void tick(false), intervalMs);
-  await new Promise<void>((done) => {
-    const stop = () => {
-      clearInterval(loop);
-      syncWatcher.stop();
-      done();
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  });
-  while (running) await new Promise((r) => setTimeout(r, 50)); // let an in-flight tick finish before closing the db
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   try {
-    unlinkSync(pidFile);
-  } catch {}
-  db?.close();
-  await coord.close();
-  io.err("stopped");
-  return 0;
+    let provider: EmbeddingProvider | null = null;
+    if (args.flags["no-embeddings"] === true) io.err("watch: embeddings disabled (--no-embeddings)");
+    else provider = resolveWatchProvider(() => createEmbeddingProvider(), io.err);
+
+    const owner = await waitForLoopOwner(runtimeDir, { holderKind: "watch", stopped: () => stopping, log: io.err });
+    if (owner === null) {
+      io.err("stopped");
+      return 0;
+    }
+    // `owner` is held until the `finally` below releases it, after the coordinator is closed.
+    try {
+      io.err(`watch: acquired the loop-owner lock (pid ${process.pid})`);
+      const { coord } = await openRepo({ ...args.flags, repo: repoDir });
+      const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
+      let db: IndexDb | null = null;
+      try {
+        try {
+          mkdirSync(coord.paths.runtimeDir, { recursive: true });
+          writeFileSync(pidFile, `${process.pid}\n`);
+        } catch (e) {
+          io.err(`warning: cannot write ${pidFile}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        let embedder: WatchEmbedder | null = null;
+        if (provider !== null) {
+          db = openIndex(coord.paths.indexDb);
+          embedder = createWatchEmbedder({ db, provider, log: io.err });
+        }
+        if (!stopping) {
+          io.err(`watching ${coord.paths.userWorktree} (interval ${intervalMs}ms); Ctrl-C to stop`);
+          const clock = { now: () => Date.now() };
+          const syncWatcher = startHumanSyncWatcher(coord.paths, coord.config, clock, intervalMs, async (now) => {
+            const r = await coord.syncOnce(now);
+            if (r.committed) io.err(`human sync: committed ${short(r.sha ?? "")}`);
+            return r;
+          });
+          const deps = { coord, embedder, log: io.err };
+          let running = false;
+          const tick = async (force: boolean) => {
+            if (running) return;
+            running = true;
+            try {
+              await watchTick(deps, { force });
+            } catch (e) {
+              io.err(`watch loop error: ${e instanceof Error ? e.message : String(e)}`);
+            } finally {
+              running = false;
+            }
+          };
+          // The new loop owner's forced tick: drain and integrate at once, and embed whatever the
+          // recovery reconcile left stale (including notes a `--no-embeddings` owner never embedded).
+          await tick(true);
+          const loop = setInterval(() => void tick(false), intervalMs);
+          await stopped;
+          clearInterval(loop);
+          syncWatcher.stop();
+          while (running) await new Promise((r) => setTimeout(r, 50)); // let an in-flight tick finish before closing the db
+        }
+      } finally {
+        try {
+          unlinkSync(pidFile);
+        } catch {}
+        db?.close();
+        await coord.close();
+      }
+      io.err("stopped");
+      return 0;
+    } finally {
+      owner.release();
+    }
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
 }
 
 function hasModelCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
   return ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some((k) => (env[k] ?? "").trim() !== "");
 }
 
+/** A scripted or mock model never touches the network, so it is paired with offline embeddings. */
+function offlineModelRequested(): boolean {
+  return modelScriptPath() !== null || mockModelRequested();
+}
+
+/** `BRAIN_MODEL_SCRIPT` wins over `BRAIN_MODEL_MOCK`; either needs no credentials. */
 function chatModelProvider(io: Io): ModelProvider {
+  const script = modelScriptPath();
+  if (script !== null) {
+    io.err(`${MODEL_SCRIPT_ENV} is set: answering model calls from ${script}`);
+    try {
+      return createModelScriptProvider(script);
+    } catch (e) {
+      throw new CliError(e instanceof Error ? e.message : String(e));
+    }
+  }
   if (mockModelRequested()) {
     io.err("BRAIN_MODEL_MOCK is set: using the mock model (canned reply, no knowledge extraction)");
     return createMockModelProvider();
@@ -671,13 +752,27 @@ async function streamedTurn(deps: Parameters<typeof runTurn>[0], sessionId: stri
   return r;
 }
 
+/**
+ * `SESSION_BUSY` (CR-9): another writer held the session's turn lock past the
+ * bound, and nothing was appended. `--once` reports it as a one-line error
+ * with exit code 1; the REPL prints the same line and keeps reading.
+ */
+async function sessionBusyAsCliError<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (e) {
+    if (e instanceof SessionBusyError) throw new CliError(e.message);
+    throw e;
+  }
+}
+
 async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
   const once = flagString(args.flags, "once");
   if (args.flags["once"] === true || (once !== undefined && once.trim() === "")) throw new CliError("chat --once: text required", 2);
   const wait = args.flags["wait"] === true;
   const model = chatModelProvider(io);
-  // Mock mode must never touch the network: pair the canned model with offline embeddings.
-  const embeddings = mockModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
+  // Mock and script modes must never touch the network: pair them with offline embeddings.
+  const embeddings = offlineModelRequested() ? new HashingEmbeddingProvider() : createEmbeddingProvider();
   const { coord } = await openRepo(args.flags);
   const db = openIndex(coord.paths.indexDb);
   const inFlight = new Set<Promise<KnowledgeUpdate>>();
@@ -698,12 +793,12 @@ async function cmdChat(args: ParsedArgs, io: Io): Promise<void> {
 
     if (once !== undefined) {
       if (io.json) {
-        const r = track(await withSpinner("thinking…", () => runTurn(deps, sessionId, once)));
+        const r = track(await sessionBusyAsCliError(withSpinner("thinking…", () => runTurn(deps, sessionId, once))));
         const knowledge = await r.knowledge;
         emit(io, { sessionId, reply: r.reply, contextNotes: r.contextNotes, knowledge, summary: formatKnowledgeSummary(knowledge) }, () => "");
         return;
       }
-      const r = track(await streamedTurn(deps, sessionId, once, io));
+      const r = track(await sessionBusyAsCliError(streamedTurn(deps, sessionId, once, io)));
       // never rejects; always awaited before exit
       const knowledge = await withSpinner("updating knowledge…", () => r.knowledge);
       if (wait) io.out(formatKnowledgeSummary(knowledge));

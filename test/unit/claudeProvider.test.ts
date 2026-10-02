@@ -1,4 +1,7 @@
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { ClaudeModelProvider, DEFAULT_MODEL, ModelProviderError, ModelRefusalError, type MessagesClient, type TextStream } from "../../src/model/claude";
 import { createEmbeddingProvider, createModelProvider } from "../../src/model";
@@ -305,6 +308,18 @@ describe("provider factories", () => {
     }
   });
 
+  test("createModelProvider passes process.env's Anthropic credentials when that is the env it is given (CLI path)", async () => {
+    await withProcessEnv(
+      { BRAIN_MODEL_PROVIDER: "anthropic", ANTHROPIC_API_KEY: " env-key ", ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: "http://env.invalid" },
+      () => {
+        const c = sdkClientOf(createModelProvider());
+        expect(c.apiKey).toBe("env-key");
+        expect(c.authToken).toBeNull();
+        expect(c.baseURL).toBe("http://env.invalid");
+      },
+    );
+  });
+
   test("createEmbeddingProvider returns the hashing provider by default and rejects unknown kinds", () => {
     const prev = process.env.BRAIN_EMBEDDINGS;
     const prevKind = process.env.BRAIN_MODEL_PROVIDER;
@@ -324,5 +339,239 @@ describe("provider factories", () => {
       if (prevKind === undefined) delete process.env.BRAIN_MODEL_PROVIDER;
       else process.env.BRAIN_MODEL_PROVIDER = prevKind;
     }
+  });
+});
+
+// --- credentials from the passed env (CR-11) ----------------------------------
+
+/** The SDK client a provider built itself (a private field; its credentials are public SDK fields). */
+function sdkClientOf(p: unknown): Anthropic {
+  return (p as { client: Anthropic }).client;
+}
+
+/** Runs `fn` with `vars` set on process.env (`undefined` deletes), then restores every touched key. */
+async function withProcessEnv(vars: Record<string, string | undefined>, fn: () => void | Promise<void>): Promise<void> {
+  const saved = new Map(Object.keys(vars).map((k) => [k, process.env[k]] as const));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** Every process.env key read while `fn` runs: process.env is swapped for a recording proxy, then restored. */
+async function processEnvReads(fn: () => Promise<void>): Promise<string[]> {
+  const real = process.env;
+  const reads: string[] = [];
+  process.env = new Proxy(real, {
+    get(target, key, receiver) {
+      if (typeof key === "string") reads.push(key);
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  try {
+    await fn();
+  } finally {
+    process.env = real;
+  }
+  return reads;
+}
+
+/**
+ * The SDK reads two non-credential operator knobs from process.env whatever it
+ * is given (src/model/claude.ts header). Any other `ANTHROPIC_*` read is a
+ * credential lookup: the three keys, the profile / config-file chain, OIDC.
+ */
+const SDK_KNOBS = new Set(["ANTHROPIC_LOG", "ANTHROPIC_CUSTOM_HEADERS"]);
+const credentialReads = (reads: string[]): string[] => [...new Set(reads.filter((k) => k.startsWith("ANTHROPIC_") && !SDK_KNOBS.has(k)))];
+
+/** Swaps global fetch (the SDK captures it at construction) for one that records requests and answers "ok". */
+function stubFetch(): { requests: { url: string; headers: Headers }[]; restore: () => void } {
+  const original = globalThis.fetch;
+  const requests: { url: string; headers: Headers }[] = [];
+  const stub = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    requests.push({ url: input instanceof Request ? input.url : String(input), headers: new Headers(init?.headers) });
+    const body = {
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: DEFAULT_MODEL,
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      stop_details: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  globalThis.fetch = stub as unknown as typeof fetch;
+  return {
+    requests,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+/** Credentials in process.env that an isolated-env provider must never use. */
+const PROCESS_CREDENTIALS = {
+  ANTHROPIC_API_KEY: "env-key",
+  ANTHROPIC_AUTH_TOKEN: "env-token",
+  ANTHROPIC_BASE_URL: "http://env.invalid",
+  ANTHROPIC_PROFILE: "env-profile",
+  ANTHROPIC_CUSTOM_HEADERS: undefined,
+};
+
+/** A process.env with no Anthropic credential of any kind (keys, profile, OIDC), for hermetic chain runs. */
+const NO_PROCESS_CREDENTIALS = {
+  ANTHROPIC_API_KEY: undefined,
+  ANTHROPIC_AUTH_TOKEN: undefined,
+  ANTHROPIC_BASE_URL: undefined,
+  ANTHROPIC_PROFILE: undefined,
+  ANTHROPIC_CUSTOM_HEADERS: undefined,
+  ANTHROPIC_ORGANIZATION_ID: undefined,
+  ANTHROPIC_WORKSPACE_ID: undefined,
+  ANTHROPIC_IDENTITY_TOKEN: undefined,
+  ANTHROPIC_IDENTITY_TOKEN_FILE: undefined,
+  ANTHROPIC_FEDERATION_RULE_ID: undefined,
+  ANTHROPIC_SERVICE_ACCOUNT_ID: undefined,
+};
+
+const turn = { system: "s", messages: [{ role: "user" as const, content: "x" }] };
+
+describe("Anthropic credentials, default mode: the SDK's own lookup is kept (CLI behaviour)", () => {
+  test("a key in env is used; credentials env lacks still fall back to process.env", async () => {
+    await withProcessEnv(PROCESS_CREDENTIALS, async () => {
+      let fromEnv: Anthropic | undefined;
+      let fallback: Anthropic | undefined;
+      const reads = await processEnvReads(async () => {
+        fromEnv = sdkClientOf(createModelProvider({ ANTHROPIC_API_KEY: "private-key" }));
+        fallback = sdkClientOf(createModelProvider({ BRAIN_MODEL_PROVIDER: "anthropic" }));
+      });
+      expect(fromEnv!.apiKey).toBe("private-key");
+      expect(fromEnv!.authToken).toBe("env-token");
+      expect(fromEnv!.baseURL).toBe("http://env.invalid");
+      expect(fallback!.apiKey).toBe("env-key");
+      expect(fallback!.authToken).toBe("env-token");
+      expect(fallback!.baseURL).toBe("http://env.invalid");
+      expect(credentialReads(reads)).toEqual(expect.arrayContaining(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]));
+    });
+  });
+
+  test("with no key anywhere, the SDK's default credential chain (profile, config dir) still runs", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "brain-cr11-"));
+    try {
+      await withProcessEnv({ ...NO_PROCESS_CREDENTIALS, ANTHROPIC_CONFIG_DIR: configDir }, async () => {
+        const net = stubFetch();
+        try {
+          let err: unknown;
+          const reads = await processEnvReads(async () => {
+            err = await createModelProvider({ BRAIN_MODEL_PROVIDER: "anthropic" }).complete(turn).catch((e) => e);
+          });
+          expect(credentialReads(reads)).toEqual(expect.arrayContaining(["ANTHROPIC_API_KEY", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE"]));
+          // the (empty) config dir has no profile, so there is still nothing to authenticate with
+          expect((err as ModelProviderError).message).toContain("Could not resolve authentication method");
+          expect(net.requests).toHaveLength(0);
+        } finally {
+          net.restore();
+        }
+      });
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Anthropic credentials, isolated env: process.env is never a credential source", () => {
+  test("control: the recorder sees the stock SDK client read ANTHROPIC_API_KEY from process.env", async () => {
+    await withProcessEnv(PROCESS_CREDENTIALS, async () => {
+      let client: Anthropic | undefined;
+      const reads = await processEnvReads(async () => {
+        client = new Anthropic();
+      });
+      expect(credentialReads(reads)).toContain("ANTHROPIC_API_KEY");
+      expect(client!.apiKey).toBe("env-key");
+    });
+  });
+
+  test("a provider built from an isolated env uses its key and base URL, and reads no credential from process.env", async () => {
+    await withProcessEnv(PROCESS_CREDENTIALS, async () => {
+      const net = stubFetch();
+      try {
+        let client: Anthropic | undefined;
+        const reads = await processEnvReads(async () => {
+          const p = createModelProvider({ ANTHROPIC_API_KEY: " private-key ", ANTHROPIC_BASE_URL: "http://private.invalid" }, { isolatedEnv: true });
+          expect(p).toBeInstanceOf(ClaudeModelProvider);
+          client = sdkClientOf(p);
+          expect(await p.complete(turn)).toBe("ok");
+        });
+        expect(credentialReads(reads)).toEqual([]);
+        expect(client!.apiKey).toBe("private-key");
+        expect(client!.authToken).toBeNull();
+        expect(client!.baseURL).toBe("http://private.invalid");
+        expect(net.requests).toHaveLength(1);
+        const req = net.requests[0]!;
+        expect(new URL(req.url).origin).toBe("http://private.invalid");
+        expect(req.headers.get("x-api-key")).toBe("private-key");
+        expect(req.headers.get("authorization")).toBeNull();
+      } finally {
+        net.restore();
+      }
+    });
+  });
+
+  test("an isolated env with only an auth token sends it as Bearer and no process.env key", async () => {
+    await withProcessEnv(PROCESS_CREDENTIALS, async () => {
+      const net = stubFetch();
+      try {
+        const reads = await processEnvReads(async () => {
+          expect(await createModelProvider({ ANTHROPIC_AUTH_TOKEN: "private-token" }, { isolatedEnv: true }).complete(turn)).toBe("ok");
+        });
+        expect(credentialReads(reads)).toEqual([]);
+        expect(net.requests).toHaveLength(1);
+        const req = net.requests[0]!;
+        expect(new URL(req.url).origin).toBe("https://api.anthropic.com");
+        expect(req.headers.get("authorization")).toBe("Bearer private-token");
+        expect(req.headers.get("x-api-key")).toBeNull();
+      } finally {
+        net.restore();
+      }
+    });
+  });
+
+  test("an isolated env without a key does not pick up process.env's key, token, base URL or profile", async () => {
+    await withProcessEnv(PROCESS_CREDENTIALS, async () => {
+      const net = stubFetch();
+      try {
+        let client: Anthropic | undefined;
+        let err: unknown;
+        const reads = await processEnvReads(async () => {
+          const p = createModelProvider({ BRAIN_MODEL: "claude-sonnet-5-5" }, { isolatedEnv: true });
+          expect(p).toBeInstanceOf(ClaudeModelProvider);
+          client = sdkClientOf(p);
+          err = await p.complete(turn).catch((e) => e);
+          // the class has the same contract: isolated with no credential options, no credentials
+          expect(sdkClientOf(new ClaudeModelProvider({ isolated: true })).apiKey).toBeNull();
+        });
+        // no credential lookup at all: neither the three keys nor the profile / config-file chain
+        expect(credentialReads(reads)).toEqual([]);
+        expect(client!.apiKey).toBeNull();
+        expect(client!.authToken).toBeNull();
+        expect(client!.baseURL).toBe("https://api.anthropic.com");
+        expect(err).toBeInstanceOf(ModelProviderError);
+        expect((err as ModelProviderError).message).toContain("Could not resolve authentication method");
+        expect((err as ModelProviderError).retryable).toBe(false);
+        expect(net.requests).toHaveLength(0);
+      } finally {
+        net.restore();
+      }
+    });
   });
 });

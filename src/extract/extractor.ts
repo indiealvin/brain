@@ -201,12 +201,14 @@ export async function extractCandidates(
 // Mock provider (tests and other phases)
 // ---------------------------------------------------------------------------
 
-export type MockResponder = (input: ModelCompleteInput) => string;
+/** May answer asynchronously (e.g. a scripted call held open until released, src/pipeline/scripted.ts). */
+export type MockResponder = (input: ModelCompleteInput) => string | Promise<string>;
 
 /**
  * Scripted ModelProvider. Given an array, responses are consumed in order and
  * an error is thrown once exhausted (so "called exactly once" is a hard
- * check). Given a function, it is invoked per call. Every call is recorded.
+ * check). Given a function, it is invoked per call (and awaited). Every call
+ * is recorded.
  */
 export class MockModelProvider implements ModelProvider {
   readonly calls: ModelCompleteInput[] = [];

@@ -201,7 +201,10 @@ TEXT NULL, attempt_count INTEGER, last_error TEXT NULL, commit_sha TEXT NULL
 
 ## 12. Execution algorithm (automatic mutation)
 
-Runs in the agent worktree under the coordinator's single-writer lock.
+Runs in the agent worktree under the coordinator's single-writer lock. That
+lock is cross-process: it is the repo-wide `RepoWorktreeLock` (§15–16,
+I-11), taken once per public write operation, so no two `brain` processes
+ever execute, integrate, rebuild, sync or recover at the same time.
 
 1. `state = RUNNING`.
 2. If the current agent branch already has a commit with this
@@ -283,7 +286,12 @@ Under `RepoWorktreeLock`:
 - Default `.gitignore` written by `brain init` excludes `.obsidian/workspace*`
   and `.brain/`.
 
-## 17. Crash recovery (startup)
+## 17. Crash recovery (startup and every drain)
+
+Runs at startup and again at the start of every drain of the queue, inside
+the same lock section as the drain. While the lock is held, no other
+process can be executing, so any `RUNNING` row seen is from a crashed
+holder.
 
 1. Agent worktree dirty → `git reset --hard agent/repo`. Never stash.
 2. For each queue row `RUNNING`: if the current `agent/repo` has a commit with
@@ -292,6 +300,10 @@ Under `RepoWorktreeLock`:
    been asked (or will be asked) for a new mutation with `replans`.
 4. `BLOCKED` rows are resolved to `REPLAN`.
 5. Reconcile index to agent HEAD.
+6. Accepted proposals are reconciled with the queue by their `mutationId`.
+   An ACCEPTED proposal with no queue row gets the same mutation rebuilt
+   from the proposal, then enqueued, executed and integrated. An ACCEPTED
+   proposal whose row is `REPLAN` is marked `STALE` (§34).
 
 ## 18. Markdown identity model
 
@@ -433,8 +445,10 @@ Any target blob change → `STALE`.
 
 `PENDING → ACCEPTED | REJECTED | STALE`. Rejected proposals persist and are
 supplied to the planner as negative evidence. **ACCEPTED** enqueues a mutation
-whose preconditions are the target snapshots; if validation fails at execution
-the proposal is marked `STALE` and nothing executes.
+whose preconditions are the target snapshots. If validation fails at execution,
+or the accepted mutation is later invalidated at rebuild (§13), the proposal is
+marked `STALE`. Decisions are compare-and-set on the current status: an
+accept and a reject of the same proposal can never both take effect.
 
 ## 35. Proposal inbox
 

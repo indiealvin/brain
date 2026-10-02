@@ -27,3 +27,54 @@ jobs:
           export BRAIN_HOME=$(mktemp -d)
           /tmp/brain init /tmp/smoke-notes
           cd /tmp/smoke-notes && BRAIN_MODEL_MOCK=1 /tmp/brain chat --once hello --wait
+
+  # The same suite on macOS. test/unit/sqliteLockPlatform.test.ts logs which
+  # SQLite library bun:sqlite uses here (system or bundled) and pins the lock
+  # behavior of docs/mac-app/design.md §5.2 against it.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com
+
+  # The same suite on Git 2.39.x, the supported floor (MIN_GIT_VERSION in
+  # src/config/doctor.ts; CR-7, docs/mac-app/design.md §11). Xcode Command
+  # Line Tools ship 2.39.5 (Apple Git-154); Debian bookworm packages 2.39.5.
+  # A failure here is a regression on the floor and fails CI.
+  test-git-2-39:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      # Before checkout, so actions/checkout clones with git. setup-bun
+      # extracts the Bun release with unzip.
+      - name: install git 2.39
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl unzip
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      # Prints the exact version, and fails unless it is 2.39.x.
+      - name: git version
+        run: git --version | grep -E '^git version 2\.39\.'
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com

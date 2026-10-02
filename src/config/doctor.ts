@@ -8,11 +8,11 @@
  * `models.retrieve`) are skipped with `offline`.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
-import { resolveBrainHome } from "../core/brainHome";
+import { repoPaths, resolveBrainHome } from "../core/brainHome";
 import { openCoordinator } from "../core/coordinator";
+import { loadConfig } from "../markdown/repo";
 import { DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
 import {
@@ -22,11 +22,24 @@ import {
   OPENROUTER_BASE_URL,
   type FetchLike,
 } from "../model/openrouter";
+import { isLockHeld, LOOP_OWNER_LOCK, readLockHolder, WORKTREE_LOCK } from "../sync/lock";
 import { maskKey, userConfigPath } from "./userConfig";
 
-export const MIN_GIT_VERSION: readonly [number, number] = [2, 40];
-/** Written by `brain watch` under `<runtimeDir>/`; read here to tell whether a daemon is running. */
+/**
+ * 2.39 covers Xcode Command Line Tools (`2.39.5 (Apple Git-154)`). The
+ * suite passes on 2.39.5 in CI (job `test-git-2-39`); the newest git
+ * feature used is `init -b` (2.28). CR-7, docs/mac-app/design.md §11.
+ */
+export const MIN_GIT_VERSION: readonly [number, number] = [2, 39];
+/**
+ * Written by `brain watch` under `<runtimeDir>/` once it holds the loop-owner
+ * lock, and removed on a clean stop. Kept for compatibility only: it outlives
+ * a crashed daemon and its pid may be reused, so nothing reads it to decide
+ * anything (`loopOwnerCheck` reads the lock instead; CR-10).
+ */
 export const WATCH_PID_FILE = "watch.pid";
+/** A live holder of the worktree lock for longer than this is reported (design §5.2: the lock has no deadline). */
+export const LONG_HELD_LOCK_MS = 10 * 60_000;
 
 export type CheckStatus = "ok" | "fail" | "warn" | "skip" | "info";
 
@@ -95,6 +108,59 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/**
+ * The worktree lock (CR-1): a momentary try-lock tells whether anyone holds
+ * it; the informational side file names the holder. A live holder that has
+ * held it for `LONG_HELD_LOCK_MS` or more is a warning, since every other
+ * writer waits behind it.
+ */
+export function worktreeLockCheck(runtimeDir: string, now = Date.now()): DoctorCheck {
+  const check = (status: CheckStatus, detail: string): DoctorCheck => ({ name: "worktree lock", status, detail, required: false });
+  let held: boolean;
+  try {
+    held = isLockHeld(runtimeDir, WORKTREE_LOCK);
+  } catch (e) {
+    return check("warn", `could not probe: ${errorMessage(e)}`);
+  }
+  if (!held) return check("ok", "free");
+  const holder = readLockHolder(runtimeDir, WORKTREE_LOCK);
+  if (!holder || !pidAlive(holder.pid)) return check("info", "held (holder unknown)");
+  const age = Math.max(0, now - holder.acquiredAtMs);
+  const who = `held by ${holder.kind} (pid ${holder.pid}) for ${formatDuration(age)}`;
+  if (age < LONG_HELD_LOCK_MS) return check("ok", who);
+  return check("warn", `${who}; every other writer waits behind it — stop that process if it is hung`);
+}
+
+/**
+ * Loop ownership (CR-10; docs/mac-app/design.md §5.3 item 2): a momentary
+ * try-lock on the loop-owner lock tells whether some process runs the repo's
+ * loop; the informational side file names it (`brain watch`, later the RPC
+ * server). `watch.pid` is not consulted: after a crash it names a pid that
+ * may since have been reused, and a waiting `brain watch` does not run the
+ * loop. `service` (installed service state) is appended to the detail.
+ */
+export function loopOwnerCheck(runtimeDir: string, service: string): DoctorCheck {
+  const check = (status: CheckStatus, detail: string): DoctorCheck => ({ name: "watch", status, detail: `${detail}; ${service}`, required: false });
+  let held: boolean;
+  try {
+    held = isLockHeld(runtimeDir, LOOP_OWNER_LOCK);
+  } catch (e) {
+    return check("warn", `unknown (could not probe the loop-owner lock: ${errorMessage(e)})`);
+  }
+  if (!held) return check("info", "not running");
+  const holder = readLockHolder(runtimeDir, LOOP_OWNER_LOCK);
+  if (!holder || !pidAlive(holder.pid)) return check("ok", "running (holder unknown)");
+  return check("ok", `running (${holder.kind}, pid ${holder.pid})`);
+}
+
 async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
   const client = new Anthropic({
     apiKey: envOr(env, "ANTHROPIC_API_KEY") || undefined,
@@ -127,7 +193,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // --- git ---------------------------------------------------------------
   const gv = (opts.gitVersion ?? defaultGitVersion)();
   const parsed = gv ? parseGitVersion(gv) : null;
-  if (!parsed) add("git", "fail", "git not found on PATH (need ≥ 2.40)");
+  if (!parsed) add("git", "fail", `git not found on PATH (need ≥ ${MIN_GIT_VERSION.join(".")})`);
   else {
     const [maj, min] = parsed;
     const okVersion = maj > MIN_GIT_VERSION[0] || (maj === MIN_GIT_VERSION[0] && min >= MIN_GIT_VERSION[1]);
@@ -260,6 +326,13 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
   // --- knowledge repo (optional) -----------------------------------------------
   if (opts.repoRoot) {
+    // Probed before opening the coordinator, which may itself wait for this lock.
+    let lockCheck: DoctorCheck | null = null;
+    try {
+      lockCheck = worktreeLockCheck(repoPaths(opts.repoRoot, loadConfig(opts.repoRoot).repoId).runtimeDir);
+    } catch {
+      // not a loadable repo: the coordinator open below reports it
+    }
     try {
       const coord = await openCoordinator(opts.repoRoot);
       try {
@@ -272,20 +345,14 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
         add("repo", "ok", `${opts.repoRoot} (repo_id ${coord.config.repoId})`, false);
         add("heads", "ok", `main ${main.slice(0, 12)}  agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`, false);
         add("queue", "ok", queue || "empty", false);
-        const pidFile = join(coord.paths.runtimeDir, WATCH_PID_FILE);
-        const service = describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service));
-        if (!existsSync(pidFile)) add("watch", "info", `unknown (no ${pidFile}); ${service}`, false);
-        else {
-          const pid = Number(readFileSync(pidFile, "utf8").trim());
-          if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) add("watch", "ok", `running (pid ${pid}); ${service}`, false);
-          else add("watch", "warn", `not running (stale ${pidFile}); ${service}`, false);
-        }
+        checks.push(loopOwnerCheck(coord.paths.runtimeDir, describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service))));
       } finally {
         await coord.close();
       }
     } catch (e) {
       add("repo", "fail", `${opts.repoRoot}: ${errorMessage(e)}`, false);
     }
+    if (lockCheck) checks.push(lockCheck);
   } else {
     add("repo", "info", "not inside a knowledge repo (pass --repo <dir> or cd into one)", false);
   }

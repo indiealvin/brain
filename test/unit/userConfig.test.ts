@@ -251,15 +251,23 @@ describe("brain doctor (in-process, injected fetch)", () => {
     expect(byName(missing.checks, "anthropic model").detail).toContain("claude-opus-5-5: 404 model not found");
   });
 
-  test("git older than 2.40 or missing is a required failure; BRAIN_HOME is created and checked", async () => {
-    const old = await runDoctor({ env: OR_ENV, offline: true, repoRoot: null, gitVersion: () => "git version 2.39.5 (Apple Git-154)" });
+  test("git older than 2.39 or missing is a required failure; Apple's 2.39.5 passes; BRAIN_HOME is created and checked", async () => {
+    const old = await runDoctor({ env: OR_ENV, offline: true, repoRoot: null, gitVersion: () => "git version 2.38.5" });
     expect(old.ok).toBe(false);
-    expect(byName(old.checks, "git").detail).toContain("older than 2.40");
+    expect(byName(old.checks, "git").status).toBe("fail");
+    expect(byName(old.checks, "git").detail).toContain("older than 2.39");
+    for (const v of ["git version 2.39.5 (Apple Git-154)", "git version 2.39.5"]) {
+      const floor = await runDoctor({ env: OR_ENV, offline: true, repoRoot: null, gitVersion: () => v });
+      expect(byName(floor.checks, "git").status).toBe("ok");
+      expect(byName(floor.checks, "git").detail).toBe(v);
+    }
     const none = await runDoctor({ env: OR_ENV, offline: true, repoRoot: null, gitVersion: () => null });
     expect(byName(none.checks, "git").status).toBe("fail");
+    expect(byName(none.checks, "git").detail).toContain("need ≥ 2.39");
     expect(byName(none.checks, "BRAIN_HOME").status).toBe("ok");
     expect(byName(none.checks, "BRAIN_HOME").detail).toContain(home);
     expect(parseGitVersion("git version 2.43.0")).toEqual([2, 43, 0]);
+    expect(parseGitVersion("git version 2.39.5 (Apple Git-154)")).toEqual([2, 39, 5]);
     expect(parseGitVersion("nonsense")).toBeNull();
   });
 

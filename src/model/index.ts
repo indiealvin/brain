@@ -7,6 +7,10 @@
  *                         anthropic/claude-sonnet-4.5 (openrouter).
  *   BRAIN_EFFORT          anthropic: low | medium | high | xhigh | max (default high)
  *                         openrouter: low | medium | high → `reasoning.effort`; unset = omit.
+ *   ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL (optional override):
+ *                         taken from `env`. When unset there, the Anthropic SDK
+ *                         falls back to process.env and its credential chain,
+ *                         unless `{ isolatedEnv: true }` (src/model/claude.ts).
  *   OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional override)
  *   BRAIN_EMBEDDINGS      hashing | openrouter. Default: openrouter when the model
  *                         provider resolves to openrouter, hashing otherwise
@@ -48,7 +52,17 @@ export function resolveProviderKind(env: NodeJS.ProcessEnv = process.env): Provi
   return hasOpenRouter && !hasAnthropic ? "openrouter" : "anthropic";
 }
 
-export function createModelProvider(env: NodeJS.ProcessEnv = process.env): ModelProvider {
+export interface CreateModelProviderOptions {
+  /**
+   * `env` is the only credential source: unset Anthropic credentials stay
+   * unset (no process.env fallback, no SDK credential chain). For a private
+   * env such as the app's `initialize.env` (design §10). Default false: the
+   * CLI passes process.env and keeps the SDK's own lookup.
+   */
+  isolatedEnv?: boolean;
+}
+
+export function createModelProvider(env: NodeJS.ProcessEnv = process.env, opts: CreateModelProviderOptions = {}): ModelProvider {
   const kind = resolveProviderKind(env);
   if (kind === "openrouter") {
     const apiKey = envOr("OPENROUTER_API_KEY", "", env);
@@ -71,7 +85,15 @@ export function createModelProvider(env: NodeJS.ProcessEnv = process.env): Model
   if (!EFFORTS.includes(effortRaw as Effort)) {
     throw new Error(`BRAIN_EFFORT must be one of ${EFFORTS.join(", ")}; got ${JSON.stringify(effortRaw)}`);
   }
-  return new ClaudeModelProvider({ model, effort: effortRaw as Effort });
+  return new ClaudeModelProvider({
+    model,
+    effort: effortRaw as Effort,
+    // CR-11: credentials from `env`; unset ones are resolved by the SDK unless isolated.
+    apiKey: envOr("ANTHROPIC_API_KEY", "", env) || undefined,
+    authToken: envOr("ANTHROPIC_AUTH_TOKEN", "", env) || undefined,
+    baseURL: envOr("ANTHROPIC_BASE_URL", "", env) || undefined,
+    isolated: opts.isolatedEnv === true,
+  });
 }
 
 /**

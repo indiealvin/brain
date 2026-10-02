@@ -7,6 +7,11 @@
  * one turn. Turn ids are zero-padded sequence numbers so that
  * `conversation://<sessionId>/<turnId>` (the grounding URI, §27) is stable
  * and sorts in order.
+ *
+ * Turn ids are unique across processes (CR-9, docs/mac-app/design.md §5.4):
+ * `appendTurn` allocates each id from the session file on every call, never
+ * from a per-instance cache, and writers call it only while holding the
+ * session's turn lock (`src/conversation/turnLock.ts`; `runTurn` does).
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,6 +34,12 @@ interface TurnLine {
   at: string;
 }
 
+/**
+ * A turn as stored (CR-8): the core `ConversationTurn` plus `at`, the
+ * ISO-8601 time `appendTurn` wrote to `TurnLine.at`, returned verbatim.
+ */
+export type StoredTurn = ConversationTurn & { at: string };
+
 export interface SessionSummary {
   sessionId: string;
   createdAt: string;
@@ -38,8 +49,15 @@ export interface SessionSummary {
 export interface ConversationStore {
   readonly dir: string;
   createSession(): string;
+  /**
+   * Append one turn. Its id is the number of turns in the session file plus
+   * one, read from the file on every call. Callers hold the session's turn
+   * lock (`withTurnLock`), so no other writer can append in between.
+   */
   appendTurn(sessionId: string, role: TurnRole, text: string): ConversationTurn;
   getTurns(sessionId: string): ConversationTurn[];
+  /** The same turns as `getTurns`, in session order, each with its stored timestamp. */
+  getStoredTurns(sessionId: string): StoredTurn[];
   lastTurns(sessionId: string, n: number): ConversationTurn[];
   listSessions(): SessionSummary[];
   hasSession(sessionId: string): boolean;
@@ -55,8 +73,6 @@ export function formatTurnId(seq: number): string {
 
 class JsonlConversationStore implements ConversationStore {
   readonly dir: string;
-  /** sessionId → number of turns already on disk (lazy, per session). */
-  private readonly counts = new Map<string, number>();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -111,28 +127,28 @@ class JsonlConversationStore implements ConversationStore {
     const sessionId = ulid();
     const header: SessionHeader = { kind: "session", sessionId, createdAt: new Date().toISOString() };
     writeFileSync(this.file(sessionId), JSON.stringify(header) + "\n", { flag: "wx" });
-    this.counts.set(sessionId, 0);
     return sessionId;
   }
 
   appendTurn(sessionId: string, role: TurnRole, text: string): ConversationTurn {
     const file = this.file(sessionId);
     if (!existsSync(file)) throw new Error(`unknown session ${sessionId}`);
-    let count = this.counts.get(sessionId);
-    if (count === undefined) {
-      count = this.readLines(sessionId).turns.length;
-    }
-    const turnId = formatTurnId(count + 1);
+    // Always from the file (CR-9): another process, or another store instance, may have appended since this one last looked.
+    const turnId = formatTurnId(this.readLines(sessionId).turns.length + 1);
     const line: TurnLine = { kind: "turn", turnId, role, text, at: new Date().toISOString() };
     // A torn trailing line (crash mid-append) is skipped by readLines; start on a fresh line so this record stays parseable.
     appendFileSync(file, (this.endsMidLine(file) ? "\n" : "") + JSON.stringify(line) + "\n");
-    this.counts.set(sessionId, count + 1);
     return { sessionId, turnId, role, text };
   }
 
   getTurns(sessionId: string): ConversationTurn[] {
     if (!isUlid(sessionId)) return [];
     return this.readLines(sessionId).turns.map((t) => ({ sessionId, turnId: t.turnId, role: t.role, text: t.text }));
+  }
+
+  getStoredTurns(sessionId: string): StoredTurn[] {
+    if (!isUlid(sessionId)) return [];
+    return this.readLines(sessionId).turns.map((t) => ({ sessionId, turnId: t.turnId, role: t.role, text: t.text, at: t.at }));
   }
 
   lastTurns(sessionId: string, n: number): ConversationTurn[] {
