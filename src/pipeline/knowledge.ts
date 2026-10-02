@@ -211,7 +211,8 @@ function plural(n: number, word: string): string {
 /**
  * One-line summary for a UI, e.g.
  * `Knowledge updated · 2 notes (1 created, 1 enriched) · 1 proposal`,
- * `Knowledge unchanged`, or `Knowledge unchanged · 1 error`.
+ * `Knowledge unchanged`, or `Knowledge unchanged · 1 error`. A `NOOP`
+ * mutation is "nothing to change" (I-3) and is never listed as not applied.
  */
 export function formatKnowledgeSummary(u: KnowledgeUpdate): string {
   const landed = u.mutations.filter((m) => LANDED_STATES.has(m.state));
@@ -224,9 +225,10 @@ export function formatKnowledgeSummary(u: KnowledgeUpdate): string {
   }
   if (u.proposals.length > 0) parts.push(plural(u.proposals.length, "proposal"));
   const head = parts.length > 0 ? `Knowledge updated · ${parts.join(" · ")}` : "Knowledge unchanged";
-  const notLanded = u.mutations.length - landed.length;
+  // NOOP means "nothing to change" (I-3): it is neither landed nor a failure, so it is not listed.
+  const notApplied = u.mutations.filter((m) => !LANDED_STATES.has(m.state) && m.state !== "NOOP");
   const extras: string[] = [];
-  if (notLanded > 0) extras.push(`${notLanded} not applied (${u.mutations.filter((m) => !LANDED_STATES.has(m.state)).map((m) => m.state).join(", ")})`);
+  if (notApplied.length > 0) extras.push(`${notApplied.length} not applied (${notApplied.map((m) => m.state).join(", ")})`);
   if (u.errors.length > 0) extras.push(plural(u.errors.length, "error"));
   return extras.length > 0 ? `${head} · ${extras.join(" · ")}` : head;
 }
