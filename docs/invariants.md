@@ -50,10 +50,12 @@ and `src/core/types.ts` are the goalposts: implementers do not edit them.
   runs in the user worktree. Git's own overwrite check protects dirty paths.
   A refusal means retry after the next Human Sync; it is not invalidation and
   causes no state change. Never stash, reset, or overwrite there.
-- **I-11 One lock.** Human Sync and integration share one file-based
-  `RepoWorktreeLock`. The second observes the first's completed state.
-- **I-12 Agent worktree is disposable.** On startup a dirty agent worktree is
-  `reset --hard` to the agent branch head. Never stash.
+- **I-11 One lock.** Human Sync, integration, rebuild, mutation execution
+  and recovery share one file-based, cross-process `RepoWorktreeLock`. The
+  second holder observes the first's completed state.
+- **I-12 Agent worktree is disposable.** At startup and at the start of
+  every drain, a dirty agent worktree is `reset --hard` to the agent branch
+  head. Never stash.
 - **I-13 Human Sync commits only quiescent human edits**, authored
   `Actor: human-sync`, never inside an agent commit, never mixing.
 - **I-14 Status transitions.** Only `active → tentative` is automatic. All
