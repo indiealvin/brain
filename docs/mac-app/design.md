@@ -805,8 +805,18 @@ options carry no credentials (`src/model/claude.ts:47–53`), and it calls
 `new Anthropic()` (`:102`), which reads `ANTHROPIC_API_KEY` from
 `process.env` (`:17–18`). CR-11 therefore has `ClaudeModelProvider` accept
 `apiKey`, `authToken` and `baseURL`, and has `createModelProvider` pass
-them from `env`, as `src/config/doctor.ts:99–102` already does. The
-`NO_MODEL` check must also run on the private env:
+them from `env`. The pass-through is an **isolated** mode that the RPC
+server opts into, and it differs from the CLI path:
+
+- **Isolated mode.** Unset values are passed as `null` and the SDK's
+  default credential chain is disabled, so nothing falls back to
+  `process.env` or an `ant auth login` profile.
+- **CLI path.** It keeps today's behaviour, including the SDK's fallback.
+
+`src/config/doctor.ts:99–102` is *not* such an isolated example. Its
+`|| undefined` lets the SDK fall back to `process.env` when the private env
+has no key, so `doctor.run` with a private env must use the isolated mode
+too (T1.3). The `NO_MODEL` check must also run on the private env:
 `hasModelCredentials(env)` takes it as a parameter (`src/cli.ts:549`).
 
 Keys never go into `process.env`, because Git subprocesses inherit it

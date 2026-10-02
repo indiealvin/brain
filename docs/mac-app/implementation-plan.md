@@ -438,7 +438,10 @@ Depends: T1.1, T0.2, T0.9 (so that `ANTHROPIC_*` keys from `initialize.env` reac
   - request, event, result, error and notification framing;
   - the four pre-`initialize` methods;
   - `initialize` with the private env (§3), `ALREADY_INITIALIZED`, and
-    `EngineInfo` with its staging value `loopOwner: "other"` (§2);
+    `EngineInfo` with its staging value `loopOwner: "other"` (§2). Every
+    provider the server builds, and `doctor.run`'s live check, uses
+    T0.9's isolated mode. `src/config/doctor.ts:99–102` currently falls
+    back to `process.env` (design §10);
   - `shutdown` with its five drain steps (step 4 in its pre-CR-5 form,
     §2 above);
   - `cancel`.
