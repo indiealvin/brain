@@ -37,7 +37,7 @@ waits for.
 | T3.2 | BrainKit: spawn the child, JSONL codec, request correlation, notification stream, `Codable` DTOs with `unknown(String)` enum cases, `UNKNOWN_METHOD` treated as "feature absent". Replay `test/rpc/transcripts/*.jsonl` in the Swift tests: decode `msg` only, and skip `test` lines (protocol §9) | T1.3 | **yes** |
 | T3.3 | First run and Settings: repo picker, `repo.init`, `doctor.run`, keys in Keychain passed as `initialize.env`, restart the child when settings change, warn when the `brain` on `PATH` differs from the bundled one | T1.3, T0.9 | no |
 | T3.4 | Conversation: sessions, streaming `reply.delta`, `SESSION_BUSY` handling. Per-turn knowledge chips appear only after T2.5 | T1.5 | no |
-| T3.6 | Proposal Inbox: diff rendering (`FileDiff`, including `beforeUnavailable`), accept / reject, the `REPLAN` → "note changed" experience | T1.6, T1.8 | no |
+| T3.6 | Proposal Inbox: diff rendering (`FileDiff`, including `beforeUnavailable`), accept / reject, the `REPLAN` → "note changed" experience | T1.6, T1.8 | accept / reject: **yes**; diffs: no |
 | T3.7 | Knowledge Browser and Search: `notes.*`, pending-integration badges, "Open in external editor" | T1.4, T1.8 | no |
 | T3.5 | Activity and notifications. The backlog views appear only after T2.5 | T1.7 | no |
 | T3.8 | History and diff views | T1.8 | no |
@@ -78,5 +78,15 @@ T3.6 and T3.7.
     up. Refetch on the next `repo.changed`.
 - Transcript headers may carry `tmp` and `modelScript`, which are Bun-only.
   The Swift replay ignores them and skips `test` lines (protocol §9).
+- Decoding notes from T1.6:
+  - `proposals.accept` on a proposal that is no longer PENDING (or whose
+    note changed) returns a normal result `{state: "REPLAN", error: "STALE"}`,
+    not an error. Show it as "the note changed; this proposal is out of date".
+  - `proposals.reject` on one that is no longer PENDING fails with
+    `PROPOSAL_NOT_PENDING`, whose `data.status` says what won.
+  - `proposals.changed` carries no payload and reports only this process's
+    changes. Refetch `proposals.list` on it, and on a `repo.changed` that
+    lists `"proposals"`.
+  - Send `note` only when it is non-empty; `""` is `INVALID_PARAMS`.
 - One `runtime/locks/turn-<sessionId>.sqlite` file per session accumulates
   over time. That is expected; cleanup can come later.
