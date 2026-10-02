@@ -78,6 +78,7 @@ instead of restating it, so there is only one source for each test.
 | CR-7 sign-off; floor chosen from the T0.10a results | Approved: floor 2.39 (T0.10a: only the floor constant failed on Git 2.39.5) | — |
 | CR-5 sign-off | Deferred | O2, M2 |
 | Capture session target (design §14.5) | Decided: one per day | — |
+| Quick Capture in the first app version | Not included; it is not core. CR-5, M2, T2.4 and T3.9 stay deferred | — |
 
 ## 3. Overview
 

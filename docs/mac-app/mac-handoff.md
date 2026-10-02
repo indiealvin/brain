@@ -44,8 +44,10 @@ waits for.
 | T3.8 | History and diff views | T1.8 | no |
 | T3.9 | Quick Capture panel and menu bar | T2.4 (needs CR-5) | no |
 
-The minimum useful alpha is T3.1–T3.4, T3.6 and T3.7. Quick Capture (T3.9)
-needs CR-5 and M2.
+**First version (owner decision, 2026-10-02):** T3.1–T3.8, without Quick
+Capture. Quick Capture (T3.9) needs CR-5 and M2, which stay deferred
+because Quick Capture is not core. The minimum useful alpha is T3.1–T3.4,
+T3.6 and T3.7.
 
 ## 2. Signed release
 
