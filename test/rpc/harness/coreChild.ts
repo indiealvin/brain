@@ -15,6 +15,10 @@
  *   `expect`, when given.
  * - `{op: "submitProposal", proposal}`: `coord.submitProposal(proposal)`.
  *   Defaults: `status` "PENDING", `evidence` as above, `reasoning` "transcript seed".
+ * - `{op: "syncOnce", expect?}`: one Human Sync pass (`coord.syncOnce`),
+ *   judged two days from now so that any edit is quiescent: a `human-sync`
+ *   commit of the user worktree's edits, whatever `sync.quiescence_ms` is.
+ *   Fails unless `committed` is `expect`, when given.
  *
  * A `present` mutation target, or a proposal target, without `noteId` or
  * `blobHash` gets them from the file at agent HEAD at that point. A write
@@ -30,6 +34,7 @@ import { noteMd, type NoteSpec } from "../../harness";
 type Json = Record<string, any>;
 
 const DEFAULT_EVIDENCE = ["conversation://transcript/000001"];
+const SYNC_LATER_MS = 2 * 86_400_000;
 
 /** `noteId` and `blobHash` of `path` at agent HEAD, where not given. */
 function snapshot(coord: RepoCoordinator, t: Json): { noteId: string; path: string; blobHash: string } {
@@ -95,6 +100,11 @@ try {
       process.stdout.write(`${JSON.stringify(r)}\n`);
     } else if (op["op"] === "submitProposal") {
       await coord.submitProposal(proposalOf(coord, op["proposal"]));
+    } else if (op["op"] === "syncOnce") {
+      // Judged a day from now, so every edit is quiescent whatever `sync.quiescence_ms` says.
+      const r = await coord.syncOnce(Date.now() + SYNC_LATER_MS);
+      if (op["expect"] !== undefined && r.committed !== op["expect"]) throw new Error(`syncOnce: expected committed ${op["expect"]}, got ${JSON.stringify(r)}`);
+      process.stdout.write(`${JSON.stringify(r)}\n`);
     } else {
       throw new Error(`unknown core op ${JSON.stringify(op["op"])}`);
     }

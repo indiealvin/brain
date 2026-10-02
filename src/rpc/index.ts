@@ -15,6 +15,7 @@
  */
 import { registerConversationMethods } from "./methods/conversation";
 import { registerFirstRunMethods } from "./methods/firstRun";
+import { registerHistoryMethods } from "./methods/history";
 import { registerLifecycleMethods } from "./methods/lifecycle";
 import { registerNotesMethods } from "./methods/notes";
 import { registerProposalMethods } from "./methods/proposals";
@@ -32,5 +33,6 @@ export function createRpcServer(opts: RpcServerOptions): RpcServer {
   registerConversationMethods(server);
   registerNotesMethods(server);
   registerProposalMethods(server);
+  registerHistoryMethods(server);
   return server;
 }

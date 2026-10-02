@@ -1,12 +1,16 @@
 /**
  * Service layer, proposals (CR-2). Listing and getting refresh staleness in
- * core, under the worktree lock. Decisions are core's compare-and-set (CR-1):
+ * core, under the worktree lock; getting with the review diff computes the
+ * diff in that same locked section (CR-4). Decisions are core's
+ * compare-and-set (CR-1):
  * this layer checks no status of its own, and core's typed errors
  * (`UnknownProposalError`, `ProposalNotPendingError`) pass through unchanged
  * for the adapters to map.
  */
+import type { ProposalDetail } from "../core/coordinator";
 import type { ExecutionResult, Proposal, ProposalStatus, RepoCoordinator } from "../core/types";
 import { UnknownProposalError } from "../proposal/store";
+import type { Coord } from "./repo";
 
 /** Every `ProposalStatus`, in lifecycle order. */
 export const PROPOSAL_STATUSES: readonly ProposalStatus[] = ["PENDING", "ACCEPTED", "REJECTED", "STALE"];
@@ -25,11 +29,20 @@ export async function proposalsList(coord: RepoCoordinator, opts: { status?: Pro
   return opts.status === undefined ? all : all.filter((p) => p.status === opts.status);
 }
 
-/** One proposal, after a staleness refresh. Throws `UnknownProposalError`. */
+/** One proposal, after a staleness refresh (`brain proposals show`). Throws `UnknownProposalError`. */
 export async function proposalsGet(coord: RepoCoordinator, proposalId: string): Promise<Proposal> {
   const p = (await coord.listProposals()).find((x) => x.proposalId === proposalId);
   if (!p) throw new UnknownProposalError(proposalId);
   return p;
+}
+
+/**
+ * One proposal and its review diff (`proposals.get`, CR-4): the staleness
+ * refresh and the diff of every write against its snapshot blob, in one
+ * locked section (`proposalDetail`). Throws `UnknownProposalError`.
+ */
+export function proposalsGetDetail(coord: Coord, proposalId: string): Promise<ProposalDetail> {
+  return coord.proposalDetail(proposalId);
 }
 
 /** Accept (executes it). A proposal that is not PENDING returns `REPLAN` / `"STALE"`. Throws `UnknownProposalError`. */

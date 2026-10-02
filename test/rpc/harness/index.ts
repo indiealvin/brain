@@ -5,6 +5,7 @@
 import "./conversation";
 import "./decision";
 import "./engine";
+import "./history";
 import "./openrouterStub";
 import "./seed";
 

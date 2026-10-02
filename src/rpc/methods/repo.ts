@@ -1,16 +1,28 @@
 /**
  * Repo and engine methods (docs/mac-app/protocol.md §4): `repo.status`,
- * `engine.status` and `engine.tick`. The two reads never take the worktree
- * lock, so the status view never waits behind an execute or integrate in any
- * process (protocol §5).
+ * `repo.pendingIntegration`, `engine.status` and `engine.tick`. The three
+ * reads never take the worktree lock, so the status view and the Knowledge
+ * Browser's badges never wait behind an execute or integrate in any process
+ * (protocol §5).
  */
-import { repoStatus, type RepoStatus } from "../../commands/repo";
+import { repoPendingIntegration, repoStatus, type PendingIntegration, type RepoStatus } from "../../commands/repo";
 import type { EngineStatus, EngineTick } from "../dto";
 import type { RequestContext, RpcServer } from "../server";
 
 /** `repo.status {}`: heads, queue counts per state, the advisory pending-proposal count, the indexed commit (`brain status` data). */
 function status(ctx: RequestContext): Promise<RepoStatus> {
   return repoStatus(ctx.server.session.coord);
+}
+
+/**
+ * `repo.pendingIntegration {}` → `{mainHead, agentHead, paths}`: the paths
+ * that differ between `main` and agent HEAD (CR-4, design §8), with both
+ * heads of the same snapshot. The Knowledge Browser's "pending integration"
+ * badges; the client refetches them when `repo.changed` lists that the
+ * heads moved.
+ */
+function pendingIntegration(ctx: RequestContext): PendingIntegration {
+  return repoPendingIntegration(ctx.server.session.coord);
 }
 
 /**
@@ -35,6 +47,7 @@ function engineTick(ctx: RequestContext): Promise<EngineTick> {
 
 export function registerRepoMethods(server: RpcServer): void {
   server.register("repo.status", { handler: status });
+  server.register("repo.pendingIntegration", { handler: pendingIntegration });
   server.register("engine.status", { handler: engineStatus });
   server.register("engine.tick", { handler: engineTick });
 }

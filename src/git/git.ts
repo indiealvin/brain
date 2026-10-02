@@ -332,3 +332,41 @@ export function identityEnv(repo: string): Record<string, string> {
   if ((name.code === 0 && name.stdout.trim() && email.code === 0 && email.stdout.trim()) || haveEnv) return {};
   return { ...FALLBACK_IDENTITY_ENV };
 }
+
+// ---------------------------------------------------------------------------
+// objects by name (diffs and history, CR-4)
+// ---------------------------------------------------------------------------
+
+/** A full or abbreviated object name in hex (4 to 64 digits): never an option, a ref name or a revision expression. */
+export const OBJECT_NAME_RE = /^[0-9a-f]{4,64}$/;
+
+/**
+ * Raw bytes of blob `blob`, or null when it is not readable: not in the
+ * object store (never written, or pruned by `git gc`), not a blob, or not an
+ * object name. Reads only (`git cat-file blob`).
+ */
+export function readBlob(repo: string, blob: string): Buffer | null {
+  if (!OBJECT_NAME_RE.test(blob)) return null;
+  const r = Bun.spawnSync(["git", "-C", repo, "cat-file", "blob", blob], { env: toEnv(), stdout: "pipe", stderr: "pipe" });
+  return r.exitCode === 0 ? Buffer.from(r.stdout) : null;
+}
+
+/**
+ * The full name of commit `name` (a full or abbreviated hex object name), or
+ * null when `name` is not hex, is ambiguous, or does not name a commit.
+ * Only hex names are accepted: no ref names, no revision expressions.
+ */
+export function resolveCommit(repo: string, name: string): string | null {
+  if (!OBJECT_NAME_RE.test(name)) return null;
+  const r = runGit(repo, ["rev-parse", "--verify", "--quiet", `${name}^{commit}`]);
+  const sha = r.stdout.trim();
+  return r.code === 0 && sha !== "" ? sha : null;
+}
+
+/** The parents of commit `sha`, first parent first (empty for a root commit). */
+export function commitParents(repo: string, sha: string): string[] {
+  const args = ["rev-list", "--parents", "--max-count=1", sha, "--"];
+  const r = runGit(repo, args);
+  if (r.code !== 0) throw new GitError(repo, args, r);
+  return r.stdout.trim().split(" ").slice(1).filter((p) => p !== "");
+}

@@ -1,0 +1,32 @@
+{
+  "chat": [{ "response": "Then one queue is enough: the review queue, with irreversible actions still approved first." }],
+  "extractor": [
+    {
+      "response": {
+        "candidates": [
+          { "kind": "decision", "claim": "Merge the approval queue into the review queue now that agent actions are reviewed after the fact", "groundedSources": ["{{lastUser}}"], "inferences": [] }
+        ]
+      }
+    }
+  ],
+  "planner": [
+    {
+      "response": {
+        "operations": [
+          {
+            "op": "MERGE",
+            "noteIds": ["01JA0000000000000000000002", "01JA0000000000000000000001"],
+            "writes": [
+              {
+                "path": "knowledge/review-queue.md",
+                "content": "---\nid: 01JA0000000000000000000002\ncreated: 2026-09-02\ntype: idea\nstatus: active\naliases:\n  - approval-queue\n---\n# Review queue\n\n## Claim\nI review agent actions after the fact, in the review queue. Irreversible actions still wait for my approval first.\n"
+              },
+              { "path": "knowledge/approval-queue.md", "content": null }
+            ],
+            "reasoning": "the approval queue and the review queue describe one queue once agent actions are reviewed after the fact"
+          }
+        ]
+      }
+    }
+  ]
+}
