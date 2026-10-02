@@ -10,7 +10,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { Database } from "bun:sqlite";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { openCoordinator } from "../../src/core/coordinator";
 import { AGENT_BRANCH } from "../../src/core/types";
 import type { ExecutionResult, Proposal, RepoCoordinator } from "../../src/core/types";
 import { isLockHeld, LockReentryError, withRepoWorktreeLock, WORKTREE_LOCK } from "../../src/sync/lock";
@@ -20,12 +22,14 @@ import {
   createMutation,
   forceQueueState,
   isClean,
+  makeTempKnowledgeRepo,
   mutationIdsOn,
   newMutationId,
   quiescentNow,
   revParse,
   seedNote,
   setupEnv,
+  withBrainHome,
   writeNote,
   type Env,
 } from "../harness";
@@ -292,6 +296,56 @@ describe("every public write waits for a worktree lock held by another process (
       SPAWN_TIMEOUT_MS,
     );
   }
+});
+
+describe("openCoordinator ensures the agent worktree under the lock (CR-1)", () => {
+  test(
+    "while another process holds the lock, opening waits and leaves that process's agent-worktree writes alone",
+    async () => {
+      const bh = withBrainHome();
+      const repo = makeTempKnowledgeRepo();
+      try {
+        const first = await openCoordinator(repo.path);
+        const { agentWorktree, runtimeDir } = first.paths;
+        await first.close();
+
+        // Another process is mid-execution (spec §12 step 6): its files are in the agent worktree.
+        const holder = await holdInAnotherProcess(runtimeDir);
+        writeFileSync(join(agentWorktree, "knowledge", "in-flight.md"), "being written by the lock holder\n");
+        let opened = false;
+        const opening = openCoordinator(repo.path).then((c) => {
+          opened = true;
+          return c;
+        });
+        await sleep(PENDING_MS);
+        expect(opened).toBe(false);
+        expect(existsSync(join(agentWorktree, "knowledge", "in-flight.md"))).toBe(true); // not reset under the holder
+
+        // The holder dies; its leftovers are reset by the next opener, which now holds the lock.
+        holder.kill("SIGKILL");
+        await holder.exited;
+        const coord = await opening;
+        try {
+          expect(existsSync(join(agentWorktree, "knowledge", "in-flight.md"))).toBe(false);
+          expect(isClean(agentWorktree)).toBe(true);
+          expect(isLockHeld(runtimeDir, WORKTREE_LOCK)).toBe(false);
+        } finally {
+          await coord.close();
+        }
+      } finally {
+        repo.cleanup();
+        bh.cleanup();
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  test("opening from inside a section that holds the lock fails at once instead of deadlocking", async () => {
+    env = await setupEnv();
+    const e = env;
+    const err = await withRepoWorktreeLock(e.coord.paths.runtimeDir, () => openCoordinator(e.repo.path).then(() => null, (x: unknown) => x));
+    expect(err).toBeInstanceOf(LockReentryError);
+  });
 });
 
 describe("the unlocked public methods do not wait for the worktree lock", () => {

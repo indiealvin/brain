@@ -11,7 +11,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { defaultServiceEnv, describeInstalledService, type ServiceEnv } from "../cli/service";
 import { repoPaths, resolveBrainHome } from "../core/brainHome";
-import { openCoordinator } from "../core/coordinator";
+import { queueStateCounts } from "../core/queue";
+import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
+import { refExists, revParse } from "../git/git";
 import { loadConfig } from "../markdown/repo";
 import { DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
@@ -326,29 +328,27 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
   // --- knowledge repo (optional) -----------------------------------------------
   if (opts.repoRoot) {
-    // Probed before opening the coordinator, which may itself wait for this lock.
+    // Read-only: doctor never opens a coordinator. Opening takes the worktree lock (CR-1), which has no
+    // deadline, so doctor would hang behind the very hung holder it is meant to report (design §5.2).
+    // Probing the lock first and opening only when it looks free would still race a holder that takes
+    // it in between (`brain watch` retakes it every tick), so the heads and the queue are read without
+    // the lock: `git rev-parse` and a read-only queue connection. Doctor writes no repo state.
     let lockCheck: DoctorCheck | null = null;
     try {
-      lockCheck = worktreeLockCheck(repoPaths(opts.repoRoot, loadConfig(opts.repoRoot).repoId).runtimeDir);
-    } catch {
-      // not a loadable repo: the coordinator open below reports it
-    }
-    try {
-      const coord = await openCoordinator(opts.repoRoot);
-      try {
-        const [main, agent, rows] = await Promise.all([coord.mainHead(), coord.agentHead(), coord.listMutations()]);
-        const counts: Record<string, number> = {};
-        for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
-        const queue = Object.entries(counts)
-          .map(([s, n]) => `${s}=${n}`)
-          .join(" ");
-        add("repo", "ok", `${opts.repoRoot} (repo_id ${coord.config.repoId})`, false);
-        add("heads", "ok", `main ${main.slice(0, 12)}  agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`, false);
-        add("queue", "ok", queue || "empty", false);
-        checks.push(loopOwnerCheck(coord.paths.runtimeDir, describeInstalledService(coord.config.repoId, defaultServiceEnv(opts.service))));
-      } finally {
-        await coord.close();
-      }
+      const config = loadConfig(opts.repoRoot);
+      const paths = repoPaths(opts.repoRoot, config.repoId);
+      lockCheck = worktreeLockCheck(paths.runtimeDir);
+      if (!refExists(opts.repoRoot, MAIN_BRANCH)) throw new Error(`branch ${MAIN_BRANCH} does not exist; run \`brain init\` first`);
+      const main = revParse(opts.repoRoot, MAIN_BRANCH);
+      const agent = refExists(opts.repoRoot, AGENT_BRANCH) ? revParse(opts.repoRoot, AGENT_BRANCH) : null;
+      const queue = queueStateCounts(paths.queueDb)
+        .map(([s, n]) => `${s}=${n}`)
+        .join(" ");
+      add("repo", "ok", `${opts.repoRoot} (repo_id ${config.repoId})`, false);
+      const agentDetail = agent === null ? `agent (none yet; created on first use)` : `agent ${agent.slice(0, 12)}${agent === main ? " (integrated)" : ""}`;
+      add("heads", "ok", `main ${main.slice(0, 12)}  ${agentDetail}`, false);
+      add("queue", "ok", queue || "empty", false);
+      checks.push(loopOwnerCheck(paths.runtimeDir, describeInstalledService(config.repoId, defaultServiceEnv(opts.service))));
     } catch (e) {
       add("repo", "fail", `${opts.repoRoot}: ${errorMessage(e)}`, false);
     }

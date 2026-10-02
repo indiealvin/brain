@@ -16,6 +16,7 @@
  *
  * Outside the lock on purpose: `enqueue` and `submitProposal` (single inserts
  * that never touch a worktree, design §5.2), and the read-only queries.
+ * `openCoordinator` takes the lock once, around `ensureAgentWorktree`.
  *
  * Proposals (§33–34) live in the proposal store; an accepted proposal
  * re-enters the queue as a mutation whose preconditions are its snapshots.
@@ -357,11 +358,21 @@ class Coordinator implements RepoCoordinator {
   }
 }
 
+/**
+ * Open the coordinator for the knowledge repo at `userWorktree`.
+ *
+ * `ensureAgentWorktree` can `checkout`, `rm -rf` or `reset --hard` the agent
+ * worktree, so it runs under the worktree lock (CR-1): another process may be
+ * in the middle of executing there (design §5.1). It stays here rather than in
+ * `recover()` because callers (the fixture harness among them) open and
+ * execute without recovering. Opening therefore waits while another process
+ * holds the lock.
+ */
 export async function openCoordinator(userWorktree: string, opts: { clock?: Clock } = {}): Promise<RepoCoordinator> {
   const config = loadConfig(userWorktree);
   const paths = repoPaths(userWorktree, config.repoId);
   for (const dir of [paths.stateDir, paths.conversationsDir, paths.runtimeDir]) mkdirSync(dir, { recursive: true });
-  ensureAgentWorktree(paths);
+  await withRepoWorktreeLock(paths.runtimeDir, async () => ensureAgentWorktree(paths));
   const queue = openQueue(paths.queueDb);
   const proposals = openProposalStore(paths.proposalsDb);
   const clock: Clock = opts.clock ?? { now: () => Date.now() };

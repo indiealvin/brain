@@ -26,7 +26,9 @@ import {
   type LockHandle,
 } from "../../src/sync/lock";
 import { LONG_HELD_LOCK_MS, runDoctor, worktreeLockCheck } from "../../src/config/doctor";
-import { makeTempKnowledgeRepo, withBrainHome } from "../harness";
+import { repoPaths } from "../../src/core/brainHome";
+import { openCoordinator } from "../../src/core/coordinator";
+import { createMutation, gitOk, makeTempKnowledgeRepo, revParse, withBrainHome } from "../harness";
 
 const LOCK_MODULE = join(import.meta.dir, "..", "..", "src", "sync", "lock.ts");
 /** Per-test timeout for tests that spawn `bun` children. */
@@ -523,6 +525,75 @@ describe("brain doctor: worktree lock", () => {
 
     h.release();
     expect(worktreeLockCheck(dir).detail).toBe("free");
+  });
+
+  test(
+    "runDoctor never waits for the worktree lock: with a holder in another process it reads heads and queue without it",
+    async () => {
+      const bh = withBrainHome();
+      const repo = makeTempKnowledgeRepo();
+      try {
+        const coord = await openCoordinator(repo.path);
+        const runtimeDir = coord.paths.runtimeDir;
+        await coord.enqueue(createMutation("knowledge/queued.md", { title: "Queued" }));
+        await coord.close();
+        const main = revParse(repo.path, "main").slice(0, 12);
+
+        const holder = spawnChild(holderScript(runtimeDir));
+        await holder.waitFor("HELD");
+        // openCoordinator waits for the lock (CR-1) ...
+        let opened = false;
+        const opening = openCoordinator(repo.path).then((c) => {
+          opened = true;
+          return c;
+        });
+        // ... doctor does not.
+        const t0 = Date.now();
+        const report = await Promise.race([runDoctor({ offline: true, repoRoot: repo.path, gitVersion: () => "git version 2.45.0", env: {} }), sleep(10_000).then(() => null)]);
+        expect(report).not.toBeNull();
+        expect(Date.now() - t0).toBeLessThan(5_000);
+        expect(opened).toBe(false);
+        const row = (name: string) => report!.checks.find((c) => c.name === name);
+        expect(row("repo")).toMatchObject({ status: "ok", detail: `${repo.path} (repo_id ${repo.repoId})` });
+        expect(row("heads")).toMatchObject({ status: "ok", detail: `main ${main}  agent ${main} (integrated)` });
+        expect(row("queue")).toMatchObject({ status: "ok", detail: "QUEUED=1" });
+        expect(row("worktree lock")!.detail).toMatch(new RegExp(`^held by test-holder \\(pid ${holder.proc.pid}\\) for \\d+s$`));
+
+        holder.proc.kill("SIGKILL");
+        await holder.proc.exited;
+        await (await opening).close();
+      } finally {
+        repo.cleanup();
+        bh.cleanup();
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  test("runDoctor writes no repo state: on a repo never opened it reports no agent branch and creates nothing", async () => {
+    const bh = withBrainHome();
+    const repo = makeTempKnowledgeRepo();
+    try {
+      const stateDir = repoPaths(repo.path, repo.repoId).stateDir;
+      const report = await runDoctor({ offline: true, repoRoot: repo.path, gitVersion: () => "git version 2.45.0", env: {} });
+      const main = revParse(repo.path, "main").slice(0, 12);
+      expect(report.checks.find((c) => c.name === "heads")).toMatchObject({ status: "ok", detail: `main ${main}  agent (none yet; created on first use)` });
+      expect(report.checks.find((c) => c.name === "queue")).toMatchObject({ status: "ok", detail: "empty" });
+      expect(existsSync(stateDir)).toBe(false);
+      expect(gitOk(repo.path, "rev-parse", "--verify", "-q", "refs/heads/agent/repo")).toBe(false);
+
+      const broken = makeTempKnowledgeRepo();
+      try {
+        rmSync(join(broken.path, ".git"), { recursive: true, force: true });
+        const r = await runDoctor({ offline: true, repoRoot: broken.path, gitVersion: () => "git version 2.45.0", env: {} });
+        expect(r.checks.find((c) => c.name === "repo")).toMatchObject({ status: "fail", detail: `${broken.path}: branch main does not exist; run \`brain init\` first` });
+      } finally {
+        broken.cleanup();
+      }
+    } finally {
+      repo.cleanup();
+      bh.cleanup();
+    }
   });
 
   test("runDoctor reports the repo's worktree lock", async () => {

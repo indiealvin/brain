@@ -6,7 +6,7 @@
  * part of the contract.
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { FileWrite, Mutation, MutationState, MutationType, QueueRow, TargetPrecondition } from "./types";
 
@@ -196,4 +196,21 @@ export class Queue {
 
 export function openQueue(dbPath: string, opts: { now?: () => string } = {}): Queue {
   return new Queue(dbPath, opts);
+}
+
+/**
+ * Row count per state, in order of each state's first row (by seq), read
+ * through a read-only connection: never creates the database, never takes a
+ * lock (`brain doctor`). Empty when the queue does not exist yet.
+ */
+export function queueStateCounts(dbPath: string): [MutationState, number][] {
+  if (!existsSync(dbPath)) return [];
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000;");
+    const rows = db.query("SELECT state, COUNT(*) AS n FROM mutations GROUP BY state ORDER BY MIN(seq)").all() as { state: string; n: number }[];
+    return rows.map((r) => [r.state as MutationState, r.n]);
+  } finally {
+    db.close();
+  }
 }
