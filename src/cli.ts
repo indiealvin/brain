@@ -44,6 +44,7 @@ import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_EMBEDDING_MODEL, 
 import { formatKnowledgeSummary, type KnowledgeUpdate } from "./pipeline/knowledge";
 import { createMockModelProvider, mockModelRequested } from "./pipeline/mock";
 import { createModelScriptProvider, MODEL_SCRIPT_ENV, modelScriptPath } from "./pipeline/scripted";
+import { ProposalNotPendingError, UnknownProposalError } from "./proposal/store";
 import { HashingEmbeddingProvider } from "./retrieval/embeddings";
 import { runTurn } from "./pipeline/session";
 import { ensureEmbeddings } from "./retrieval/embeddings";
@@ -409,6 +410,13 @@ function proposalLine(p: Proposal): string {
   return `${p.proposalId}  ${p.status.padEnd(8)}  ${p.operation.padEnd(20)}  ${p.targets.map((t) => t.path).join(", ")}`;
 }
 
+/** Map the core's typed proposal errors (protocol.md §4: UNKNOWN_PROPOSAL, PROPOSAL_NOT_PENDING) to CLI errors. */
+function proposalCliError(e: unknown): never {
+  if (e instanceof UnknownProposalError) throw new CliError(`unknown proposal ${e.proposalId}`);
+  if (e instanceof ProposalNotPendingError) throw new CliError(`proposal ${e.proposalId} is already ${e.status}`);
+  throw e;
+}
+
 async function cmdProposals(args: ParsedArgs, io: Io): Promise<void> {
   const sub = args.positional[1] ?? "list";
   const id = args.positional[2];
@@ -440,16 +448,14 @@ async function cmdProposals(args: ParsedArgs, io: Io): Promise<void> {
       }
       case "accept": {
         if (!id) throw new CliError("proposals accept: <id> required", 2);
-        const r = await coord.acceptProposal(id);
+        const r = await coord.acceptProposal(id).catch(proposalCliError);
         emit(io, r, () => `${id}: ${r.state}${r.commitSha ? ` ${short(r.commitSha)}` : ""}${r.error ? ` (${r.error})` : ""}`);
         return;
       }
       case "reject": {
         if (!id) throw new CliError("proposals reject: <id> required", 2);
-        const p = (await coord.listProposals()).find((x) => x.proposalId === id);
-        if (!p) throw new CliError(`unknown proposal ${id}`);
-        if (p.status !== "PENDING") throw new CliError(`proposal ${id} is already ${p.status}`);
-        await coord.rejectProposal(id, flagString(args.flags, "note"));
+        // The PENDING check is the core's compare-and-set (CR-1); a lost one is ProposalNotPendingError.
+        await coord.rejectProposal(id, flagString(args.flags, "note")).catch(proposalCliError);
         emit(io, { proposalId: id, status: "REJECTED" }, () => `${id}: REJECTED`);
         return;
       }

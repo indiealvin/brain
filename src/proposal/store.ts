@@ -5,6 +5,11 @@
  * content-addressed: every target carries the blob hash it was proposed
  * against, and any target whose current blob differs (or is missing) marks
  * the proposal STALE. Rejections persist as negative evidence.
+ *
+ * Decisions are compare-and-set (§34; CR-1, docs/mac-app/design.md §5.2):
+ * `decide` names the status it expects and updates only while that status
+ * still holds, so an accept and a reject of one proposal can never both
+ * take effect.
  */
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
@@ -29,6 +34,48 @@ CREATE INDEX IF NOT EXISTS proposals_status ON proposals(status);
 `;
 
 export type ProposalDecision = Extract<ProposalStatus, "ACCEPTED" | "REJECTED" | "STALE">;
+
+/** Error code for a decision on a proposal that does not exist (protocol.md §4). */
+export const UNKNOWN_PROPOSAL = "UNKNOWN_PROPOSAL";
+/** Error code for a reject of a proposal that is no longer PENDING (protocol.md §4; CR-1). */
+export const PROPOSAL_NOT_PENDING = "PROPOSAL_NOT_PENDING";
+
+/** No proposal has this id. */
+export class UnknownProposalError extends Error {
+  readonly code = UNKNOWN_PROPOSAL;
+  readonly proposalId: string;
+  constructor(proposalId: string) {
+    super(`unknown proposal ${proposalId}`);
+    this.name = "UnknownProposalError";
+    this.proposalId = proposalId;
+  }
+}
+
+/**
+ * A reject found the proposal no longer PENDING: another decision (an
+ * accept, a reject, or a staleness mark) took effect first. `status` is the
+ * status it found. Adapters map it to `PROPOSAL_NOT_PENDING`.
+ */
+export class ProposalNotPendingError extends Error {
+  readonly code = PROPOSAL_NOT_PENDING;
+  readonly proposalId: string;
+  readonly status: ProposalStatus;
+  constructor(proposalId: string, status: ProposalStatus) {
+    super(`proposal ${proposalId} is already ${status} (${PROPOSAL_NOT_PENDING})`);
+    this.name = "ProposalNotPendingError";
+    this.proposalId = proposalId;
+    this.status = status;
+  }
+}
+
+/**
+ * The decisions `decide` allows (design §5.2): every PENDING decision, and
+ * ACCEPTED → STALE when the accepted mutation cannot apply.
+ */
+function allowedDecision(from: ProposalStatus, to: ProposalDecision): boolean {
+  if (from === "PENDING") return to === "ACCEPTED" || to === "REJECTED" || to === "STALE";
+  return from === "ACCEPTED" && to === "STALE";
+}
 
 export interface DecideOptions {
   decisionNote?: string;
@@ -118,20 +165,29 @@ export class ProposalStore {
   }
 
   /**
-   * Resolve a proposal. No from-status guard: an ACCEPTED proposal whose
-   * execution fails its snapshot preconditions becomes STALE (§34).
-   * `decisionNote` is kept when omitted.
+   * Compare-and-set decision: move proposal `id` from status `from` to `to`
+   * only if it is still `from` (`UPDATE … WHERE status = ?`). Returns true
+   * when the decision took effect, false when the proposal is in another
+   * status (a lost compare-and-set; nothing is written). Throws
+   * `UnknownProposalError` for an unknown id. Allowed: PENDING → ACCEPTED /
+   * REJECTED / STALE, and ACCEPTED → STALE. `decisionNote` is kept when
+   * omitted.
    */
-  decide(id: string, status: ProposalDecision, opts: DecideOptions = {}): void {
+  decide(id: string, from: "PENDING", to: ProposalDecision, opts?: DecideOptions): boolean;
+  decide(id: string, from: "ACCEPTED", to: "STALE", opts?: DecideOptions): boolean;
+  decide(id: string, from: ProposalStatus, to: ProposalDecision, opts: DecideOptions = {}): boolean {
+    if (!allowedDecision(from, to)) throw new Error(`proposals: ${from} → ${to} is not an allowed decision`);
     const sets = ["status = ?", "resolved_at = ?"];
-    const args: (string | null)[] = [status, opts.resolvedAt ?? this.now()];
+    const args: (string | null)[] = [to, opts.resolvedAt ?? this.now()];
     if (opts.decisionNote !== undefined) {
       sets.push("decision_note = ?");
       args.push(opts.decisionNote);
     }
-    args.push(id);
-    const r = this.db.query(`UPDATE proposals SET ${sets.join(", ")} WHERE proposal_id = ?`).run(...args);
-    if (r.changes === 0) throw new Error(`proposals: unknown proposal ${id}`);
+    args.push(id, from);
+    const r = this.db.query(`UPDATE proposals SET ${sets.join(", ")} WHERE proposal_id = ? AND status = ?`).run(...args);
+    if (r.changes > 0) return true;
+    if (!this.get(id)) throw new UnknownProposalError(id);
+    return false;
   }
 
   /**
@@ -142,8 +198,8 @@ export class ProposalStore {
   refreshStaleness(currentBlob: (path: string) => string | null): string[] {
     const marked: string[] = [];
     for (const p of this.list("PENDING")) {
-      if (p.targets.some((t) => currentBlob(t.path) !== t.blobHash)) {
-        this.decide(p.proposalId, "STALE");
+      // Compare-and-set: a proposal decided since the list was read keeps that decision.
+      if (p.targets.some((t) => currentBlob(t.path) !== t.blobHash) && this.decide(p.proposalId, "PENDING", "STALE")) {
         marked.push(p.proposalId);
       }
     }

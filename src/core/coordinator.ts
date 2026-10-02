@@ -20,6 +20,9 @@
  *
  * Proposals (§33–34) live in the proposal store; an accepted proposal
  * re-enters the queue as a mutation whose preconditions are its snapshots.
+ * Every decision is a compare-and-set on the proposal's status, made inside
+ * the locked section that checked it (CR-1), so of a concurrent accept and
+ * reject of one proposal, in any two processes, exactly one takes effect.
  */
 import { mkdirSync } from "node:fs";
 import { basename } from "node:path";
@@ -42,7 +45,7 @@ import { repoPaths } from "./brainHome";
 import { executeMutation } from "./executor";
 import { integrateOnce, mainMoved } from "./integrate";
 import { openQueue, type Queue } from "./queue";
-import { openProposalStore, type ProposalStore } from "../proposal/store";
+import { openProposalStore, ProposalNotPendingError, UnknownProposalError, type ProposalStore } from "../proposal/store";
 import { rebuildAgentBranch } from "./rebuild";
 import { isClean, logGrepTrailer } from "../git/git";
 import { agentHead, ensureAgentWorktree, fastForwardAgentToMain, mainHead, resetAgentWorktree } from "../git/worktree";
@@ -299,21 +302,23 @@ class Coordinator implements RepoCoordinator {
    * Accept: re-check staleness against agent HEAD (after catching up with
    * main), then re-enter the proposal as a mutation whose preconditions are
    * its target snapshots and run it like submit(). A stale or already
-   * resolved proposal executes nothing. If execution fails its
-   * preconditions (REPLAN) the proposal becomes STALE (§34).
+   * resolved proposal executes nothing and returns `REPLAN` / `"STALE"`;
+   * that includes losing the PENDING → ACCEPTED compare-and-set to another
+   * decision. If execution fails its preconditions (REPLAN) the proposal
+   * goes ACCEPTED → STALE (§34). Throws `UnknownProposalError` for an
+   * unknown id.
    */
   async acceptProposal(proposalId: string): Promise<ExecutionResult> {
     return this.exclusive(async () => {
       const found = this.proposals.get(proposalId);
-      if (!found) throw new Error(`acceptProposal: unknown proposal ${proposalId}`);
+      if (!found) throw new UnknownProposalError(proposalId);
       if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
       await this.catchUpAgentBranch();
       this.refreshProposalStaleness();
       const p = this.proposals.get(proposalId)!;
-      if (p.status !== "PENDING") {
+      if (p.status !== "PENDING" || !this.proposals.decide(proposalId, "PENDING", "ACCEPTED", { resolvedAt: this.nowIso() })) {
         return { mutationId: p.mutationId, state: "REPLAN", error: "STALE" };
       }
-      this.proposals.decide(proposalId, "ACCEPTED", { resolvedAt: this.nowIso() });
       const mutation: Mutation = {
         mutationId: p.mutationId,
         type: p.operation,
@@ -327,7 +332,8 @@ class Coordinator implements RepoCoordinator {
       this.queue.enqueue(mutation);
       const r = await this.executeUnlocked(mutation.mutationId);
       if (r.state === "REPLAN") {
-        this.proposals.decide(proposalId, "STALE", { resolvedAt: this.nowIso() });
+        // ACCEPTED above, in this same section, so the compare-and-set holds.
+        this.proposals.decide(proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() });
         return r;
       }
       if (r.state === "COMMITTED") await this.integrateUnlocked();
@@ -336,9 +342,20 @@ class Coordinator implements RepoCoordinator {
     });
   }
 
+  /**
+   * Reject a PENDING proposal. In one locked section: refresh staleness
+   * against agent HEAD as `listProposals` does (I-19: a proposal whose target
+   * changed is STALE and must never be recorded as REJECTED), then a
+   * PENDING → REJECTED compare-and-set. Throws `ProposalNotPendingError`
+   * (with the status found) when the proposal is no longer PENDING —
+   * accepted, rejected, or STALE, including marked STALE by this refresh —
+   * and `UnknownProposalError` for an unknown id.
+   */
   async rejectProposal(proposalId: string, decisionNote?: string): Promise<void> {
     await this.exclusive(async () => {
-      this.proposals.decide(proposalId, "REJECTED", { decisionNote, resolvedAt: this.nowIso() });
+      this.refreshProposalStaleness();
+      if (this.proposals.decide(proposalId, "PENDING", "REJECTED", { decisionNote, resolvedAt: this.nowIso() })) return;
+      throw new ProposalNotPendingError(proposalId, this.proposals.get(proposalId)!.status);
     });
   }
 
