@@ -18,7 +18,7 @@ import { queueStateCounts } from "../core/queue";
 import { AGENT_BRANCH, MAIN_BRANCH } from "../core/types";
 import { refExists, revParse } from "../git/git";
 import { loadConfig } from "../markdown/repo";
-import { DEFAULT_MODEL } from "../model/claude";
+import { createAnthropicClient, DEFAULT_MODEL } from "../model/claude";
 import { resolveProviderKind, type ProviderKind } from "../model/index";
 import {
   DEFAULT_OPENROUTER_EMBEDDING_DIMS,
@@ -65,12 +65,20 @@ export interface DoctorReport {
 
 export interface DoctorOptions {
   env?: NodeJS.ProcessEnv;
+  /**
+   * `env` is the only credential source for the live Anthropic check (CR-11
+   * isolated mode, as `createModelProvider(env, {isolatedEnv: true})`): no
+   * `process.env` fallback, no SDK default credential chain. For a private
+   * env such as the RPC server's (`doctor.run`). Default false: the CLI keeps
+   * the SDK's own lookup.
+   */
+  isolatedEnv?: boolean;
   /** Knowledge repo root (already resolved by the caller), or null when not inside one. */
   repoRoot?: string | null;
   offline?: boolean;
   /** Injected for tests; default global fetch. */
   fetch?: FetchLike;
-  /** Injected for tests; default `new Anthropic(...).models.retrieve(model)`. Must throw on auth / not-found. */
+  /** Injected for tests; default `createAnthropicClient(…from env, isolatedEnv).models.retrieve(model)`. Must throw on auth / not-found. */
   retrieveModel?: (model: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Injected for tests; default runs `git --version`. */
   gitVersion?: () => string | null;
@@ -253,11 +261,19 @@ export async function brainVersionCheck(running: RunningBrain, onPath: string | 
   return check("warn", `${onPath} is ${version} but ${self}; mixed brain versions sharing a BRAIN_HOME are unsupported, so install one version everywhere`);
 }
 
-async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<void> {
-  const client = new Anthropic({
-    apiKey: envOr(env, "ANTHROPIC_API_KEY") || undefined,
-    authToken: envOr(env, "ANTHROPIC_AUTH_TOKEN") || undefined,
-    baseURL: envOr(env, "ANTHROPIC_BASE_URL") || undefined,
+/**
+ * The live Anthropic check: `models.retrieve(model)` with the credentials in
+ * `env`. With `isolated` (CR-11, design §10) `env` is the only source: an
+ * unset key, token or base URL stays unset instead of being read from
+ * `process.env`, and the SDK's default credential chain is off. Without it
+ * (the CLI), the SDK's own lookup fills whatever `env` lacks, as before.
+ */
+async function defaultRetrieveModel(model: string, env: NodeJS.ProcessEnv, timeoutMs: number, isolated: boolean): Promise<void> {
+  const client = createAnthropicClient({
+    apiKey: envOr(env, "ANTHROPIC_API_KEY"),
+    authToken: envOr(env, "ANTHROPIC_AUTH_TOKEN"),
+    baseURL: envOr(env, "ANTHROPIC_BASE_URL"),
+    isolated,
     timeout: timeoutMs,
     maxRetries: 0,
   });
@@ -411,7 +427,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
     }
   } else if (kind === "anthropic" && keyOk) {
     try {
-      await (opts.retrieveModel ?? ((m, e) => defaultRetrieveModel(m, e, timeoutMs)))(model, env);
+      await (opts.retrieveModel ?? ((m, e) => defaultRetrieveModel(m, e, timeoutMs, opts.isolatedEnv === true)))(model, env);
       add("anthropic model", "ok", `${model} is available`);
     } catch (e) {
       add("anthropic model", "fail", `${model}: ${describeAnthropicError(e)}`);

@@ -68,6 +68,15 @@ The protocol does not depend on stdio. A later `runtime/rpc.sock` transport
   `SESSION_BUSY`, because a fast reply can release the lock within the
   bound.
 - Unknown `type` values and unknown fields must be ignored by the client.
+  The server likewise ignores unknown request and `params` fields. A
+  missing or `null` `params` is `{}`.
+- A line the server cannot attribute to a request gets an `error` with
+  **`"id": null`** and code `INVALID_PARAMS`: a line that is not JSON, a
+  value that is not an object with a string `id`, or a request that reuses
+  the `id` of a request still in flight (`data: {id}`; the stream of the
+  request already using that id is left intact). The message never quotes
+  the line. A request with a string `id` but a missing `method` or a
+  non-object `params` gets `INVALID_PARAMS` with its own `id`.
 
 ## 3. Lifecycle
 
@@ -551,7 +560,11 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
 - `test/rpc/transcripts/*.jsonl`: recorded sessions.
   - The first line is a header,
     `{"asserts": {"notifications": [<type>, …]}}`, listing the notification
-    types the transcript asserts.
+    types the transcript asserts. Two optional header fields are for the Bun
+    harness only (`test/rpc/harness/transcript.ts`), and the Swift replay
+    ignores them: `tmp`, the temp root as recorded, which the harness maps to
+    the run's own temp root wherever it occurs, so recorded paths stay
+    concrete; and `modelScript`, a model script for the server (CR-6).
   - Every other line is one of these:
     - a message, `{"dir": "c2s" | "s2c", "msg": {…}, "match"?: {…}}`;
     - an out-of-band test step, `{"dir": "test", "step": {…}}`. A step is,
@@ -569,7 +582,10 @@ This contract is enforced the same way `test/fixtures/` enforces the engine.
     - `{"$contains": [x, …]}`: the array holds every listed element, and
       may hold others.
 
-    Without a matcher, a value matches exactly.
+    Without a matcher, a value matches exactly. A `<ulid>` or `<sha>`
+    match binds the recorded value to the actual one, and the Bun harness
+    rewrites the recorded value to the actual one in every later line, so
+    a later request can carry an id from an earlier result.
   - `repo.changed.domains` always gets a `$contains` matcher, because one
     poll can catch several domains, and new domains are additive (§8).
   - Server messages match as subsets: extra fields are ignored (§2).

@@ -1,0 +1,23 @@
+{"asserts":{"notifications":[]},"tmp":"/tmp/brain-transcript"}
+{"dir":"test","step":{"op":"sendRaw","line":"{\"id\": \"1\", \"method\": \"repo.init\""}}
+{"dir":"s2c","msg":{"id":null,"type":"error","error":{"code":"INVALID_PARAMS","message":"malformed JSON (a line of 33 characters)"}},"match":{"/error/message":"<any>"}}
+{"dir":"test","step":{"op":"sendRaw","line":"[1, 2, 3]"}}
+{"dir":"s2c","msg":{"id":null,"type":"error","error":{"code":"INVALID_PARAMS","message":"a request must be a JSON object with a string id"}},"match":{"/error/message":"<any>"}}
+{"dir":"test","step":{"op":"sendRaw","line":"{\"method\": \"shutdown\"}"}}
+{"dir":"s2c","msg":{"id":null,"type":"error","error":{"code":"INVALID_PARAMS","message":"a request must be a JSON object with a string id"}},"match":{"/error/message":"<any>"}}
+{"dir":"test","step":{"op":"sendRaw","line":"{\"id\": 7, \"method\": \"shutdown\"}"}}
+{"dir":"s2c","msg":{"id":null,"type":"error","error":{"code":"INVALID_PARAMS","message":"a request must be a JSON object with a string id"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"2","params":{}}}
+{"dir":"s2c","msg":{"id":"2","type":"error","error":{"code":"INVALID_PARAMS","message":"method must be a non-empty string"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"3","method":"repo.init","params":["/tmp/brain-transcript/notes"]}}
+{"dir":"s2c","msg":{"id":"3","type":"error","error":{"code":"INVALID_PARAMS","message":"params must be an object"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"4","method":"repo.init","params":{"path":42}}}
+{"dir":"s2c","msg":{"id":"4","type":"error","error":{"code":"INVALID_PARAMS","message":"path is required and must be a non-empty string"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"5","method":"repo.init","params":{}}}
+{"dir":"s2c","msg":{"id":"5","type":"error","error":{"code":"INVALID_PARAMS","message":"path is required and must be a non-empty string"}},"match":{"/error/message":"<any>"}}
+{"dir":"c2s","msg":{"id":"6","method":"repo.init","params":{"path":"/tmp/brain-transcript/notes","ignored":{"nested":true}},"ignoredTopLevel":1}}
+{"dir":"s2c","msg":{"id":"6","type":"result","data":{"path":"/tmp/brain-transcript/notes","repoId":"01M3YZ5E6TT8WXVN6VYZVSNWFT","createdConfig":true,"createdRepo":true,"written":["brain.toml",".gitignore","AGENTS.md","knowledge/.keep"],"commitSha":"948bd65fdaf2746f059013a68cd07a8c71cec2b0"}},"match":{"/data/repoId":"<ulid>","/data/commitSha":"<sha>"}}
+{"dir":"c2s","msg":{"id":"7","method":"cancel","params":{"target":"nothing-in-flight"}}}
+{"dir":"s2c","msg":{"id":"7","type":"result","data":{"cancelled":false}}}
+{"dir":"c2s","msg":{"id":"8","method":"shutdown"}}
+{"dir":"s2c","msg":{"id":"8","type":"result","data":{}}}
