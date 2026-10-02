@@ -11,7 +11,7 @@ preconditions, committed on an agent branch and fast-forwarded into `main`.
 
 ## Install
 
-Single binary, no runtime to install. Needs Git ≥ 2.40 and an API key from
+Single binary, no runtime to install. Needs Git ≥ 2.39 and an API key from
 OpenRouter or Anthropic.
 
 ```bash

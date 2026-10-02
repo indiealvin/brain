@@ -25,7 +25,12 @@ import {
 import { isLockHeld, LOOP_OWNER_LOCK, readLockHolder, WORKTREE_LOCK } from "../sync/lock";
 import { maskKey, userConfigPath } from "./userConfig";
 
-export const MIN_GIT_VERSION: readonly [number, number] = [2, 40];
+/**
+ * 2.39 covers Xcode Command Line Tools (`2.39.5 (Apple Git-154)`). The
+ * suite passes on 2.39.5 in CI (job `test-git-2-39`); the newest git
+ * feature used is `init -b` (2.28). CR-7, docs/mac-app/design.md §11.
+ */
+export const MIN_GIT_VERSION: readonly [number, number] = [2, 39];
 /**
  * Written by `brain watch` under `<runtimeDir>/` once it holds the loop-owner
  * lock, and removed on a clean stop. Kept for compatibility only: it outlives
@@ -188,7 +193,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // --- git ---------------------------------------------------------------
   const gv = (opts.gitVersion ?? defaultGitVersion)();
   const parsed = gv ? parseGitVersion(gv) : null;
-  if (!parsed) add("git", "fail", "git not found on PATH (need ≥ 2.40)");
+  if (!parsed) add("git", "fail", `git not found on PATH (need ≥ ${MIN_GIT_VERSION.join(".")})`);
   else {
     const [maj, min] = parsed;
     const okVersion = maj > MIN_GIT_VERSION[0] || (maj === MIN_GIT_VERSION[0] && min >= MIN_GIT_VERSION[1]);

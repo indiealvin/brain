@@ -846,13 +846,13 @@ follow-up.
   `.github/workflows/release.yml` already builds, signed with the app.
   Bun-compiled binaries need hardened-runtime entitlements for JIT. The
   exact set must be verified on a real build, not copied from memory.
-- **Git version (CR-7).** `brain doctor` requires Git ≥ 2.40
-  (`src/config/doctor.ts:27`). Its own parser comment cites
-  `2.39.5 (Apple Git-154)`, which is what Xcode Command Line Tools ship, so
-  a stock Mac fails the check. The commit that introduced the floor
-  (`9ab3836`) records no reason. Before choosing between lowering the
-  floor, bundling Git, or requiring Homebrew Git, run the suite against
-  2.39.x.
+- **Git version (CR-7).** Decided 2026-10-02: `brain doctor` requires
+  Git ≥ 2.39 (`MIN_GIT_VERSION`, `src/config/doctor.ts`), so the
+  `2.39.5 (Apple Git-154)` that Xcode Command Line Tools ship passes and
+  the app neither bundles Git nor requires Homebrew Git. Evidence: the full
+  suite on Git 2.39.5 (CI job `test-git-2-39`, `debian:bookworm`) failed
+  only on the old 2.40 floor itself, no git command failed, and the newest
+  git feature `src/` uses is `init -b` (2.28).
 
 ## 12. Degradation
 
