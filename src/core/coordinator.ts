@@ -23,6 +23,16 @@
  * Every decision is a compare-and-set on the proposal's status, made inside
  * the locked section that checked it (CR-1), so of a concurrent accept and
  * reject of one proposal, in any two processes, exactly one takes effect.
+ *
+ * Recovery (§17) runs at startup (`recover()`) and again at the start of
+ * every `drainQueued`, inside the drain's one locked section (CR-1, design
+ * §5.2). Execution holds the worktree lock from start to finish, so a lock
+ * holder knows every `RUNNING` row it sees was left by a dead process. Both
+ * end with accept reconciliation (§17 step 6): an ACCEPTED proposal with no
+ * queue row (a crash between the ACCEPTED write and the enqueue) gets the
+ * same mutation rebuilt, enqueued, executed and integrated; one whose row is
+ * `REPLAN` becomes STALE. Every proposal staleness refresh runs that second
+ * check too.
  */
 import { mkdirSync } from "node:fs";
 import { basename } from "node:path";
@@ -58,6 +68,42 @@ import { blobAt, showFile } from "../git/git";
 import { reconcileIndex as reconcileIndexFiles } from "../index/reconcile";
 import { syncOnce as humanSyncOnce } from "../sync/humanSync";
 import { assertLockNotHeldInThisChain, withRepoWorktreeLock, WORKTREE_LOCK } from "../sync/lock";
+
+/**
+ * Test-only crash hook (CR-1 acceptance test 4, docs/mac-app/design.md §5.2:
+ * "a delay or crash hook used only in tests is acceptable"). When set to `1`,
+ * `acceptProposal` SIGKILLs its own process right after the PENDING →
+ * ACCEPTED compare-and-set and before the enqueue: the one point where an
+ * accept is recorded in `proposals.sqlite` but has no row in `queue.sqlite`,
+ * which accept reconciliation (spec §17 step 6) repairs. Nothing runs after
+ * the kill (no `finally`, no lock release; the kernel drops the lock), as in a
+ * real crash. Unset in production.
+ */
+export const ACCEPT_CRASH_ENV = "BRAIN_TEST_CRASH_AFTER_ACCEPT";
+
+function crashAfterAcceptForTests(): void {
+  if (process.env[ACCEPT_CRASH_ENV] === "1") process.kill(process.pid, "SIGKILL"); // test-only, see ACCEPT_CRASH_ENV
+}
+
+/**
+ * The mutation an accepted proposal runs as (§34): its preconditions are the
+ * proposal's target snapshots. `acceptProposal` and accept reconciliation
+ * (§17 step 6) both build it here, so a reconciled accept runs exactly the
+ * mutation the interrupted accept would have: same `mutationId`, writes,
+ * preconditions, type, summary, evidence and reasoning.
+ */
+function mutationFromProposal(p: Proposal): Mutation {
+  return {
+    mutationId: p.mutationId,
+    type: p.operation,
+    summary: `${p.operation.toLowerCase()} ${p.targets.map((t) => basename(t.path)).join(", ")}`,
+    targets: p.targets.map((t) => ({ kind: "present", noteId: t.noteId, path: t.path, blobHash: t.blobHash })),
+    writes: p.writes,
+    dependsOn: [],
+    evidence: p.evidence,
+    reasoning: p.reasoning,
+  };
+}
 
 /** In-process single-writer mutex: serializes every locked public method (see `exclusive`). */
 class Serial {
@@ -204,10 +250,17 @@ class Coordinator implements RepoCoordinator {
     return result;
   }
 
-  /** Execute every QUEUED automatic mutation in seq order, then integrate. */
+  /**
+   * Recover (§17 steps 1, 2, 4 and 6), then execute every QUEUED mutation in
+   * seq order, then integrate when anything committed. All in one locked
+   * section (CR-1), so a `RUNNING` row or a dirty agent worktree left by a
+   * process that died is resolved by the next drain in any process, without
+   * a restart. Returns every execution this drain ran: recovery's
+   * re-executions and reconciled accepts first, then the QUEUED rows.
+   */
   async drainQueued(): Promise<ExecutionResult[]> {
     return this.exclusive(async () => {
-      const out: ExecutionResult[] = [];
+      const out = await this.recoverUnlocked({ reconcileIndex: false });
       for (const row of this.queue.listByState(["QUEUED"])) out.push(await this.executeUnlocked(row.mutationId));
       if (out.some((r) => r.state === "COMMITTED")) await this.integrateUnlocked();
       return out;
@@ -229,25 +282,83 @@ class Coordinator implements RepoCoordinator {
     return this.exclusive(() => humanSyncOnce(this.paths, this.config, now ?? this.clock.now()));
   }
 
-  // -- recovery (§17 steps 1–4) ---------------------------------------------
+  // -- recovery (§17) -------------------------------------------------------
 
+  /**
+   * Crash recovery (§17), shared by `recover()` (startup) and the start of
+   * every `drainQueued`. Caller holds the worktree lock, so no other process
+   * is executing: every `RUNNING` row is a dead holder's (CR-1). Steps, in
+   * order:
+   * 1. a dirty agent worktree is reset to `agent/repo` (I-12);
+   * 2. a `RUNNING` row whose `Mutation-ID` is on `agent/repo` becomes
+   *    COMMITTED; any other is re-executed (I-7);
+   * 4. `BLOCKED` rows become `REPLAN` (step 3: `REPLAN` is never replayed);
+   * 5. only when `reconcileIndex` (startup): the index projects agent HEAD;
+   * 6. accept reconciliation (`reconcileAcceptsUnlocked`).
+   * Integration is left to the caller, except for reconciled accepts. Returns
+   * the executions run in steps 2 and 6.
+   */
+  private async recoverUnlocked(opts: { reconcileIndex: boolean }): Promise<ExecutionResult[]> {
+    if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
+    const out: ExecutionResult[] = [];
+    for (const row of this.queue.listByState(["RUNNING"])) {
+      const shas = logGrepTrailer(this.paths.agentWorktree, AGENT_BRANCH, "Mutation-ID", row.mutationId);
+      if (shas.length > 0) {
+        this.queue.setState(row.mutationId, "COMMITTED", { commitSha: shas[0]!, lastError: null });
+      } else {
+        out.push(await this.executeUnlocked(row.mutationId));
+      }
+    }
+    for (const row of this.queue.listByState(["BLOCKED"])) {
+      this.queue.setState(row.mutationId, "REPLAN", { lastError: row.lastError ?? "BLOCKED: dependency invalidated" });
+    }
+    if (opts.reconcileIndex) await this.reconcileIndexUnlocked();
+    out.push(...(await this.reconcileAcceptsUnlocked()));
+    return out;
+  }
+
+  /**
+   * Accept reconciliation (§17 step 6; design §5.2 "An accept completes after
+   * a crash"). Each ACCEPTED proposal is matched to its queue row by its
+   * stable `mutationId`:
+   * - no row (the accept crashed between the ACCEPTED write and the enqueue):
+   *   the same mutation is rebuilt and run as `acceptProposal` runs it —
+   *   enqueued, executed, integrated, or STALE on `REPLAN`;
+   * - row in `REPLAN`: the proposal becomes STALE;
+   * - any other state: nothing to do.
+   * Idempotent: `enqueue` is a no-op for an existing id, and a mutation whose
+   * commit is already on `agent/repo` is recognised by its trailer. Caller
+   * holds the worktree lock. Returns the executions it ran.
+   */
+  private async reconcileAcceptsUnlocked(): Promise<ExecutionResult[]> {
+    const out: ExecutionResult[] = [];
+    for (const p of this.proposals.list("ACCEPTED")) {
+      if (this.queue.get(p.mutationId) === undefined) out.push(await this.runAcceptedUnlocked(p));
+    }
+    this.staleReplannedAccepts();
+    return out;
+  }
+
+  /**
+   * ACCEPTED → STALE for every accepted proposal whose mutation reached
+   * `REPLAN`: at execution, or later when a rebuild invalidated it before it
+   * integrated (§34 as amended by CR-1). Caller holds the worktree lock.
+   * Returns the ids marked.
+   */
+  private staleReplannedAccepts(): string[] {
+    const marked: string[] = [];
+    for (const p of this.proposals.list("ACCEPTED")) {
+      if (this.queue.get(p.mutationId)?.state !== "REPLAN") continue;
+      if (this.proposals.decide(p.proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() })) marked.push(p.proposalId);
+    }
+    return marked;
+  }
+
+  /** Startup recovery: §17 steps 1–6, after making sure the agent worktree exists. */
   async recover(): Promise<void> {
     await this.exclusive(async () => {
       ensureAgentWorktree(this.paths);
-      if (!isClean(this.paths.agentWorktree)) resetAgentWorktree(this.paths);
-      for (const row of this.queue.listByState(["RUNNING"])) {
-        const shas = logGrepTrailer(this.paths.agentWorktree, AGENT_BRANCH, "Mutation-ID", row.mutationId);
-        if (shas.length > 0) {
-          this.queue.setState(row.mutationId, "COMMITTED", { commitSha: shas[0]!, lastError: null });
-        } else {
-          await this.executeUnlocked(row.mutationId);
-        }
-      }
-      for (const row of this.queue.listByState(["BLOCKED"])) {
-        this.queue.setState(row.mutationId, "REPLAN", { lastError: row.lastError ?? "BLOCKED: dependency invalidated" });
-      }
-      // §17 step 5: index projects agent HEAD.
-      await this.reconcileIndexUnlocked();
+      await this.recoverUnlocked({ reconcileIndex: true });
     });
   }
 
@@ -281,16 +392,27 @@ class Coordinator implements RepoCoordinator {
 
   // -- proposals (§33–34) ---------------------------------------------------
 
-  /** I-19: mark PENDING proposals STALE when any target blob differs at agent HEAD. Caller holds the worktree lock. */
+  /**
+   * Staleness refresh: I-19 marks PENDING proposals STALE when any target
+   * blob differs at agent HEAD; then accepted proposals whose mutation is in
+   * `REPLAN` go ACCEPTED → STALE (§17 step 6's check, design §5.2). Caller
+   * holds the worktree lock. Returns the ids marked.
+   */
   private refreshProposalStaleness(): string[] {
-    return this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
+    const pending = this.proposals.refreshStaleness((path) => blobAt(this.paths.agentWorktree, AGENT_BRANCH, path));
+    return [...pending, ...this.staleReplannedAccepts()];
   }
 
   async submitProposal(proposal: Proposal): Promise<void> {
     this.proposals.create(proposal);
   }
 
-  /** Writes STALE marks, so it takes the worktree lock like every other write (CR-1). */
+  /**
+   * Every proposal, after a staleness refresh: changed targets (I-19) and
+   * accepted mutations that reached `REPLAN` (§34) are marked STALE first.
+   * Writes those marks, so it takes the worktree lock like every other write
+   * (CR-1).
+   */
   async listProposals(): Promise<Proposal[]> {
     return this.exclusive(async () => {
       this.refreshProposalStaleness();
@@ -307,6 +429,11 @@ class Coordinator implements RepoCoordinator {
    * decision. If execution fails its preconditions (REPLAN) the proposal
    * goes ACCEPTED → STALE (§34). Throws `UnknownProposalError` for an
    * unknown id.
+   *
+   * The ACCEPTED write (`proposals.sqlite`) and the enqueue (`queue.sqlite`)
+   * share no transaction. A crash between them is completed by accept
+   * reconciliation at the next recovery (§17 step 6); `ACCEPT_CRASH_ENV`
+   * injects that crash in tests.
    */
   async acceptProposal(proposalId: string): Promise<ExecutionResult> {
     return this.exclusive(async () => {
@@ -319,27 +446,32 @@ class Coordinator implements RepoCoordinator {
       if (p.status !== "PENDING" || !this.proposals.decide(proposalId, "PENDING", "ACCEPTED", { resolvedAt: this.nowIso() })) {
         return { mutationId: p.mutationId, state: "REPLAN", error: "STALE" };
       }
-      const mutation: Mutation = {
-        mutationId: p.mutationId,
-        type: p.operation,
-        summary: `${p.operation.toLowerCase()} ${p.targets.map((t) => basename(t.path)).join(", ")}`,
-        targets: p.targets.map((t) => ({ kind: "present", noteId: t.noteId, path: t.path, blobHash: t.blobHash })),
-        writes: p.writes,
-        dependsOn: [],
-        evidence: p.evidence,
-        reasoning: p.reasoning,
-      };
-      this.queue.enqueue(mutation);
-      const r = await this.executeUnlocked(mutation.mutationId);
-      if (r.state === "REPLAN") {
-        // ACCEPTED above, in this same section, so the compare-and-set holds.
-        this.proposals.decide(proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() });
-        return r;
-      }
-      if (r.state === "COMMITTED") await this.integrateUnlocked();
-      const row = this.queue.get(mutation.mutationId);
-      return row ? { ...r, state: row.state, commitSha: row.commitSha ?? r.commitSha } : r;
+      // A crash here leaves ACCEPTED with no queue row; recovery's accept reconciliation completes it.
+      crashAfterAcceptForTests();
+      return this.runAcceptedUnlocked(p);
     });
+  }
+
+  /**
+   * Run an ACCEPTED proposal's mutation (`mutationFromProposal`) as submit()
+   * runs one: enqueue (a no-op when its row exists), execute, then integrate
+   * when it committed. If execution fails its preconditions (REPLAN) the
+   * proposal goes ACCEPTED → STALE (§34). Used by `acceptProposal` right after
+   * its compare-and-set and by accept reconciliation after a crash. Caller
+   * holds the worktree lock.
+   */
+  private async runAcceptedUnlocked(p: Proposal): Promise<ExecutionResult> {
+    const mutation = mutationFromProposal(p);
+    this.queue.enqueue(mutation);
+    const r = await this.executeUnlocked(mutation.mutationId);
+    if (r.state === "REPLAN") {
+      // The proposal is ACCEPTED and this section holds the lock, so the compare-and-set holds.
+      this.proposals.decide(p.proposalId, "ACCEPTED", "STALE", { resolvedAt: this.nowIso() });
+      return r;
+    }
+    if (r.state === "COMMITTED") await this.integrateUnlocked();
+    const row = this.queue.get(mutation.mutationId);
+    return row ? { ...r, state: row.state, commitSha: row.commitSha ?? r.commitSha } : r;
   }
 
   /**
