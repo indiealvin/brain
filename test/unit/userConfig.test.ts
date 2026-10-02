@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatDoctorReport, parseGitVersion, runDoctor, type DoctorCheck } from "../../src/config/doctor";
+import pkg from "../../package.json" with { type: "json" };
+import { formatDoctorReport, parseBrainVersion, parseGitVersion, probeBrainVersion, runDoctor, runningBrain, type DoctorCheck } from "../../src/config/doctor";
 import { applyUserConfigToEnv, formatUserConfig, loadUserConfig, maskKey, saveUserConfig, userConfigPath, type UserConfig } from "../../src/config/userConfig";
 import { createEmbeddingProvider, defaultEmbeddingsKind, OpenRouterEmbeddingProvider } from "../../src/model";
 import type { FetchLike } from "../../src/model/openrouter";
@@ -286,5 +287,131 @@ describe("brain doctor (in-process, injected fetch)", () => {
       process.env.BRAIN_HOME = prev;
       chmodSync(ro, 0o700);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// doctor: mixed brain versions (docs/mac-app/design.md §5.2, §5.5 item 9)
+// ---------------------------------------------------------------------------
+
+describe("brain doctor: the brain on PATH vs this brain", () => {
+  const OR_ENV = { OPENROUTER_API_KEY: "sk-or-v1-doctortest1234", BRAIN_MODEL: "anthropic/claude-sonnet-4.5" };
+  const running = { version: "0.2.0", path: "/opt/brain-app/brain" };
+  const base = { env: OR_ENV, offline: true, repoRoot: null, gitVersion: gitOk, running };
+
+  /** Writes an executable `#!/bin/sh` script named `brain` into a fresh dir; returns its path. */
+  function fakeBrain(body: string): string {
+    const dir = mkdtempSync(join(home, "fakebin-"));
+    const path = join(dir, "brain");
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  }
+
+  test("same version → ok; different version → warn naming both versions and paths, exit code unaffected", async () => {
+    const probed: string[] = [];
+    const same = await runDoctor({ ...base, brainOnPath: () => "/usr/local/bin/brain", brainVersion: async (p) => (probed.push(p), "brain 0.2.0\n") });
+    const s = byName(same.checks, "brain on PATH");
+    expect(s.status).toBe("ok");
+    expect(s.detail).toContain("/usr/local/bin/brain is 0.2.0");
+    expect(probed).toEqual(["/usr/local/bin/brain"]);
+
+    const mixed = await runDoctor({ ...base, brainOnPath: () => "/usr/local/bin/brain", brainVersion: async () => "brain 0.1.3\n" });
+    const m = byName(mixed.checks, "brain on PATH");
+    expect(m.status).toBe("warn");
+    expect(m.required).toBe(false);
+    expect(m.detail).toContain("/usr/local/bin/brain is 0.1.3");
+    expect(m.detail).toContain("this brain is 0.2.0 (/opt/brain-app/brain)");
+    expect(m.detail).toContain("unsupported");
+    expect(mixed.ok).toBe(true);
+    expect(formatDoctorReport(mixed)).toMatch(/\[warn\] brain on PATH\s+\/usr\/local\/bin\/brain is 0\.1\.3/);
+    expect(formatDoctorReport(mixed)).toContain("all required checks passed");
+  });
+
+  test("no brain on PATH → info, nothing probed; the default lookup searches env.PATH only", async () => {
+    let probed = 0;
+    const none = await runDoctor({ ...base, brainOnPath: () => null, brainVersion: async () => (probed++, "brain 0.2.0") });
+    const c = byName(none.checks, "brain on PATH");
+    expect(c.status).toBe("info");
+    expect(c.detail).toBe("not on PATH; this brain is 0.2.0 (/opt/brain-app/brain)");
+    expect(probed).toBe(0);
+    expect(none.ok).toBe(true);
+
+    // default lookup: an env without PATH finds nothing; an env whose PATH holds a brain finds that one
+    const noPath = await runDoctor({ ...base, brainVersion: async () => (probed++, "brain 0.2.0") });
+    expect(byName(noPath.checks, "brain on PATH").status).toBe("info");
+    expect(probed).toBe(0);
+    const fake = fakeBrain('echo "brain 0.2.0"');
+    const found = await runDoctor({ ...base, env: { ...OR_ENV, PATH: join(fake, "..") } });
+    expect(byName(found.checks, "brain on PATH").status).toBe("ok");
+    expect(byName(found.checks, "brain on PATH").detail).toContain(`${fake} is 0.2.0`);
+  });
+
+  test("a broken brain on PATH (probe fails, or prints no version) → warn, exit code unaffected", async () => {
+    const failed = await runDoctor({
+      ...base,
+      brainOnPath: () => "/usr/local/bin/brain",
+      brainVersion: async () => {
+        throw new Error("no answer within 3000 ms");
+      },
+    });
+    const f = byName(failed.checks, "brain on PATH");
+    expect(f.status).toBe("warn");
+    expect(f.detail).toContain("`/usr/local/bin/brain --version` failed (no answer within 3000 ms)");
+    expect(f.detail).toContain("this brain is 0.2.0");
+    expect(failed.ok).toBe(true);
+
+    const garbled = await runDoctor({ ...base, brainOnPath: () => "/usr/local/bin/brain", brainVersion: async () => "usage: brain [options]\n" });
+    const g = byName(garbled.checks, "brain on PATH");
+    expect(g.status).toBe("warn");
+    expect(g.detail).toContain("printed no brain version");
+    expect(garbled.ok).toBe(true);
+  });
+
+  test("the brain on PATH is this very file (symlink resolved) → ok without running it", async () => {
+    const self = fakeBrain('echo "brain 9.9.9"');
+    const link = join(mkdtempSync(join(home, "linkbin-")), "brain");
+    symlinkSync(self, link);
+    let probed = 0;
+    const r = await runDoctor({ ...base, running: { version: "0.2.0", path: self }, brainOnPath: () => link, brainVersion: async () => (probed++, "brain 9.9.9") });
+    const c = byName(r.checks, "brain on PATH");
+    expect(c.status).toBe("ok");
+    expect(c.detail).toBe(`${link} (this brain, 0.2.0)`);
+    expect(probed).toBe(0);
+  });
+
+  test("probeBrainVersion runs `<path> --version`; a failing, hanging or missing binary rejects promptly", async () => {
+    expect(await probeBrainVersion(fakeBrain('[ "$1" = --version ] && echo "brain 9.9.9"'))).toBe("brain 9.9.9\n");
+    await expect(probeBrainVersion(fakeBrain("exit 3"))).rejects.toThrow("exit code 3");
+    await expect(probeBrainVersion(join(home, "no-such-brain"))).rejects.toThrow();
+    const t0 = Date.now();
+    await expect(probeBrainVersion(fakeBrain("sleep 30"), 200)).rejects.toThrow("no answer within 200 ms");
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  test(
+    "a hanging brain whose grandchild holds stdout does not keep the doctor process alive",
+    () => {
+      // Killing only the child would leave `sleep` holding the pipe, and this process would linger ~30 s.
+      const hang = fakeBrain("sleep 30\necho brain 9.9.9");
+      const script = join(home, "probe-hang.ts");
+      const doctorTs = join(import.meta.dir, "../../src/config/doctor.ts");
+      writeFileSync(script, `import { probeBrainVersion } from ${JSON.stringify(doctorTs)};\nawait probeBrainVersion(${JSON.stringify(hang)}, 200).then(() => console.log("resolved"), (e) => console.log(e.message));\n`);
+      const t0 = Date.now();
+      const r = Bun.spawnSync(["bun", script], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+      expect(r.stdout.toString().trim()).toBe("no answer within 200 ms");
+      expect(Date.now() - t0).toBeLessThan(15_000);
+    },
+    60_000,
+  );
+
+  test("parseBrainVersion / runningBrain", () => {
+    expect(parseBrainVersion("brain 0.1.4\n")).toBe("0.1.4");
+    expect(parseBrainVersion("brain 0.2.0-rc.1")).toBe("0.2.0-rc.1");
+    expect(parseBrainVersion("brain: unknown option --version")).toBeNull();
+    expect(parseBrainVersion("")).toBeNull();
+    const self = runningBrain();
+    expect(self.version).toBe(pkg.version);
+    expect(self.path).toBe(join(import.meta.dir, "../../src/cli.ts")); // from source: the entry script, not the bun executable
   });
 });
