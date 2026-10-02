@@ -80,6 +80,40 @@ instead of restating it, so there is only one source for each test.
 | Capture session target (design §14.5) | Decided: one per day | — |
 | Quick Capture in the first app version | Not included; it is not core. CR-5, M2, T2.4 and T3.9 stay deferred | — |
 
+## Status (updated by the main agent at each acceptance)
+
+Branch `impl/mac-m0`. Each task listed below was merged with `--no-ff`
+after the main agent re-ran the full suite and `tsc` on the merged result
+and checked that its changes stayed in scope.
+
+| Task | Merge commit | Tests after merge |
+|---|---|---|
+| T1.2 | `23d4c7d` | 319 |
+| T0.2 | `a0cd7a2` | 333 |
+| T0.1 | `ee90828` | 364 |
+| T0.9 | `366bf75` | 371 |
+| T0.3 | `91d140e` | 383 |
+| T0.10a | `e596c8b` | 383 |
+| T0.7 | `e2787e5` | 390 |
+| T0.8 | `ec032c6` | 398 |
+| T0.10b | `988ca0c` | 398 |
+| O1 (owner) | `b923808` | — |
+| T0.4a–c | `2cd8211` | 419 |
+| T0.11 | `e106411` | 427 |
+| T0.5 | `8b36d6b` | 435 |
+| T0.6 | `513ea6a` | 443 |
+| T1.1 | `39271b2` | 448 |
+| T1.3 | `264f4d6` | 518 |
+| T1.4 | `b746970` | 538 |
+
+**M0 is complete.** Every design §5.2 test passes on Linux and macOS (CI
+37047160031), and the version is 0.2.0, which is released by the next merge
+to `main` (version-driven `release.yml`).
+
+**M1:** T1.5 is in progress; T1.6, T1.7 and T1.8 are next.
+
+**Deferred by the owner:** CR-5, M2, T2.4 and T3.9's capture panel.
+
 ## 3. Overview
 
 ```
