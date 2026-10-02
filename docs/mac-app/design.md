@@ -239,9 +239,20 @@ and rejected in §15.
     item 4. The spike is now the unit test
     `test/unit/sqliteLockPlatform.test.ts` (task T0.1), with the same
     check names (A1–H4). It runs in the main suite on the Linux and the
-    macOS CI jobs and logs which SQLite library `bun:sqlite` uses. **macOS
-    has not been verified yet**: the first green run of the `test-macos`
-    CI job is that verification.
+    macOS CI jobs and logs which SQLite library `bun:sqlite` uses.
+
+    **macOS was verified on 2026-10-02** (CI run 37038737387,
+    `macos-latest`, arm64, Bun 1.4.2). There `bun:sqlite` uses the
+    **system** `/usr/lib/libsqlite3.dylib`, SQLite 3.51.0 in Apple's build;
+    Linux uses Bun's bundled 3.53.2. Every lock-relevant check passed on
+    macOS: A1–A8a, B, C0–C3a, D, E, F, G and H1–H4. The one failure was the
+    setup of C3b. That check concerns hot-journal recovery of a *data*
+    database, which CR-1 does not rely on, and Apple's SQLite did not leave
+    a hot journal from the spilling writer. C3b now logs the writer's
+    journal state on every platform and asserts recovery correctness
+    everywhere: the lock is acquired, uncommitted rows are invisible, and
+    `integrity_check` passes. It requires a genuinely hot journal only on
+    Linux, where that path is verified.
   - `flock(2)` through FFI is an acceptable alternative, with one
     condition: the lock file must be opened close-on-exec. `flock` locks
     follow inherited descriptors, so a spawned `git` process could

@@ -14,12 +14,11 @@ from the core. "Ready" means the core dependency has landed on
 
 ## 0. Before you start
 
-- [ ] **macOS CI result (T0.1).** Read the `test-macos` CI job log. It shows
-      whether `bun:sqlite` uses the system SQLite or Bun's bundled copy,
-      and whether the lock checks (`test/unit/sqliteLockPlatform.test.ts`,
-      checks A1–H4) pass on macOS. Record the result in `design.md` §5.2,
-      replacing "macOS has not been verified yet". If anything fails, stop:
-      the whole CR-1 lock design rests on it.
+- [x] **macOS CI result (T0.1).** Done 2026-10-02: `bun:sqlite` uses the
+      system SQLite (3.51.0, Apple build), and every lock-relevant check
+      passed. See `design.md` §5.2. The C3b log line in the `test-macos`
+      job shows why Apple's SQLite left no hot journal, which helps only
+      if hot-journal recovery ever matters on macOS.
 - [ ] **Run the suite on your Mac once:** `bun install && bunx tsc --noEmit
       && bun test`. This also covers Apple Git (`git --version` should say
       `2.39.5 (Apple Git-154)` or newer; the floor is 2.39 after T0.10b).
